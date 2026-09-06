@@ -1,0 +1,160 @@
+name: pgpushy
+description: Plan and apply Postgres schema changes with pgpushy, including the plan-artifact deployment flow.
+author: Arcanyx
+
+branding:
+  icon: database
+  color: blue
+
+inputs:
+  command:
+    description: |
+      What to run: setup, validate, generate-check, plan or apply.
+
+      `setup` installs the binary and stops, for a workflow that wants to call
+      pgpushy itself. The other four are the CLI's own commands, with
+      `generate-check` spelling `pgpushy generate --check`.
+    required: true
+  version:
+    description: |
+      Which pgpushy release to install, e.g. 0.3.2. A leading `v` is accepted.
+
+      There is no "latest". A plan and the apply of that plan should be run by
+      the same program, and a schema tool that changed under a repository
+      between two runs of one workflow would make that untrue.
+    required: true
+  env:
+    description: |
+      Which `[env.<name>]` block in pgpushy.toml to reconcile against.
+
+      Required for `plan` and `apply`, and rejected for the rest: `validate`
+      and `generate` connect to nothing, and the CLI refuses `--env` there
+      rather than ignoring it (spec §10.2).
+    required: false
+  config:
+    description: |
+      Path to pgpushy.toml, relative to `working-directory`. Passed as
+      `--config`, which selects a whole project: paths inside the file resolve
+      against the file's own directory, not against the working directory.
+    required: false
+  working-directory:
+    description: Directory to run pgpushy in. Defaults to the workspace root.
+    required: false
+    default: "."
+  plan-out:
+    description: |
+      Where `plan` writes its artifact — the manifest, one plan per managed
+      schema, and summary.json (spec §8.9). Relative to `working-directory`.
+      Upload it, review it, and apply exactly it with the `plan` input.
+
+      Optional: a plan with no `plan-out` still writes an artifact, into the
+      runner's temp directory, because summary.json is where the `destructive`
+      output and the pull-request comment come from.
+    required: false
+  plan:
+    description: |
+      A plan artifact for `apply` to apply exactly, passed as `--plan`.
+
+      The apply order, the plans and the seeds all live in the artifact, so
+      this needs no source checkout — which is the point of the artifact: what
+      gets applied is what was reviewed, not what the tree says now.
+    required: false
+  comment:
+    description: |
+      For `plan`: upsert the plan onto the pull request as a comment, one per
+      environment, edited in place rather than appended to.
+
+      Needs `permissions: pull-requests: write` on the job. Has no effect off
+      a pull-request event, and says so.
+    required: false
+    default: "false"
+  token:
+    description: Token used to post the plan comment, and only for that.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  exit-code:
+    description: |
+      pgpushy's exit code: 0 success, 1 refused, 2 a valid plan that would
+      destroy something (spec §9.1). Set whatever the code is, including when
+      the step then fails on it — but a caller reading it after a non-zero
+      code needs `continue-on-error: true` on this step, or an `if: always()`
+      on the step doing the reading.
+    value: ${{ steps.pgpushy.outputs.exit-code }}
+  destructive:
+    description: |
+      `true` or `false` for `plan`, empty for everything else. Read from the
+      artifact's summary.json; a plan that was refused outright wrote no
+      artifact and nothing was classified, so it reports `false`.
+    value: ${{ steps.pgpushy.outputs.destructive }}
+  pgpushy-path:
+    description: Absolute path of the installed binary. It is also on PATH.
+    value: ${{ steps.install.outputs.pgpushy-path }}
+
+# A composite action: fetching one binary and running it is not worth a
+# container pull, and there is no reason to make a repository that uses a Rust
+# CLI carry a Node runtime to invoke it. The shell lives in scripts/ rather
+# than inline so that shellcheck and a local terminal can both reach it.
+runs:
+  using: composite
+  steps:
+    # Before the network: the combinations this action refuses are refusals
+    # the CLI would also make, and making them here means the first line of a
+    # failed run says which input was wrong.
+    - name: Check the inputs
+      shell: bash
+      run: "$GITHUB_ACTION_PATH/scripts/inputs.sh"
+      env:
+        COMMAND: ${{ inputs.command }}
+        VERSION: ${{ inputs.version }}
+        PGPUSHY_ENV: ${{ inputs.env }}
+        PLAN_OUT: ${{ inputs.plan-out }}
+        PLAN: ${{ inputs.plan }}
+        COMMENT: ${{ inputs.comment }}
+
+    - name: Install pgpushy
+      id: install
+      shell: bash
+      run: "$GITHUB_ACTION_PATH/scripts/install.sh"
+      env:
+        VERSION: ${{ inputs.version }}
+
+    # Never fails. The exit code is the contract (spec §9.1) and has to reach
+    # the caller as an output whatever it is, so failing on it is the last
+    # step's job rather than this one's.
+    - name: Run pgpushy
+      id: pgpushy
+      shell: bash
+      run: "$GITHUB_ACTION_PATH/scripts/run.sh"
+      env:
+        COMMAND: ${{ inputs.command }}
+        PGPUSHY_ENV: ${{ inputs.env }}
+        CONFIG: ${{ inputs.config }}
+        PLAN_OUT: ${{ inputs.plan-out }}
+        PLAN: ${{ inputs.plan }}
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+
+    # Runs whatever pgpushy exited with, because a destructive or refused plan
+    # is the plan most worth putting in front of a reviewer.
+    - name: Comment the plan on the pull request
+      if: inputs.command == 'plan' && inputs.comment == 'true'
+      shell: bash
+      run: "$GITHUB_ACTION_PATH/scripts/comment.sh"
+      env:
+        COMMENT: ${{ inputs.comment }}
+        PGPUSHY_ENV: ${{ inputs.env }}
+        EXIT_CODE: ${{ steps.pgpushy.outputs.exit-code }}
+        LOG_FILE: ${{ steps.pgpushy.outputs.log-file }}
+        PLAN_DIR: ${{ steps.pgpushy.outputs.plan-dir }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        GH_TOKEN: ${{ inputs.token }}
+
+    # The step fails when pgpushy did, exit 2 included: a destructive plan
+    # stops a pipeline by default, and a workflow that would rather route on
+    # it than stop sets `continue-on-error: true` and reads `destructive`.
+    - name: Exit with pgpushy's exit code
+      shell: bash
+      run: exit "$EXIT_CODE"
+      env:
+        EXIT_CODE: ${{ steps.pgpushy.outputs.exit-code }}
