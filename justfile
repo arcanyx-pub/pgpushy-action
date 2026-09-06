@@ -7,12 +7,19 @@ actionlint := justfile_directory() / ".actionlint" / "actionlint"
 default:
     @just --list
 
-# Lint the workflows and every script the action runs
+# Lint the workflows and every script, and run the comment body checks
 lint: _actionlint
     {{ actionlint }} -color
-    shellcheck scripts/*.sh
+    shellcheck scripts/*.sh .github/fixtures/comment/check.sh
+    bash .github/fixtures/comment/check.sh
 
 # Fetch the pinned actionlint into .actionlint/ if it is not already there
+#
+# Pinned by hash and not just by version. This repository's subject is that a
+# downloaded binary in CI is a supply-chain step, and a linter fetched on
+# nothing but TLS would make that a claim rather than a practice. The hashes
+# are actionlint's own published checksums for the pinned release; CI pins the
+# same version and the same linux-amd64 hash.
 _actionlint:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -30,11 +37,33 @@ _actionlint:
         arm64 | aarch64) arch=arm64 ;;
         *) echo "no actionlint build for $(uname -m)" >&2; exit 1 ;;
     esac
-    mkdir -p "$(dirname "{{ actionlint }}")"
+    case "${os}_${arch}" in
+        linux_amd64)  want=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 ;;
+        linux_arm64)  want=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6 ;;
+        darwin_amd64) want=5b44c3bc2255115c9b69e30efc0fecdf498fdb63c5d58e17084fd5f16324c644 ;;
+        darwin_arm64) want=aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f ;;
+    esac
+    dir="$(dirname "{{ actionlint }}")"
+    mkdir -p "$dir"
+    tarball="$dir/actionlint.tar.gz"
     echo "fetching actionlint {{ actionlint_version }} ($os-$arch)"
-    curl --fail --silent --show-error --location \
+    curl --proto '=https' --proto-redir '=https' --fail --silent --show-error --location \
         "https://github.com/rhysd/actionlint/releases/download/v{{ actionlint_version }}/actionlint_{{ actionlint_version }}_${os}_${arch}.tar.gz" \
-        | tar xz -C "$(dirname "{{ actionlint }}")" actionlint
+        -o "$tarball"
+    if command -v sha256sum >/dev/null; then
+        got=$(sha256sum "$tarball" | awk '{print $1}')
+    else
+        got=$(shasum -a 256 "$tarball" | awk '{print $1}')
+    fi
+    if [[ "$got" != "$want" ]]; then
+        rm -f "$tarball"
+        echo "actionlint {{ actionlint_version }} ($os-$arch) failed SHA-256 verification" >&2
+        echo "  expected $want" >&2
+        echo "  got      $got" >&2
+        exit 1
+    fi
+    tar xz -C "$dir" -f "$tarball" actionlint
+    rm -f "$tarball"
 
 # Tag vX.Y.Z, move the v<major> tag onto it, and push both
 release version:

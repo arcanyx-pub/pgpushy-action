@@ -28,13 +28,27 @@ jobs:
       # CI is a supply-chain step, and it would be odd to be casual about it
       # here. actionlint shells out to shellcheck for `run:` bodies, and
       # shellcheck is already on the runner image.
+      # Pinned by hash, not just by version. This repository's subject is that
+      # a downloaded binary in CI is a supply-chain step, and a linter fetched
+      # on nothing but TLS would make that a claim rather than a practice. The
+      # hash is actionlint's own published checksum for this release; the
+      # justfile pins the same version and carries the hash for each platform.
       - name: Install actionlint
         run: |
           set -euo pipefail
           version=1.7.12
-          curl --fail --silent --show-error --location \
+          want=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          curl --proto '=https' --proto-redir '=https' \
+            --fail --silent --show-error --location \
             "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz" \
-            | tar xz actionlint
+            -o actionlint.tar.gz
+          got=$(sha256sum actionlint.tar.gz | awk '{print $1}')
+          if [ "$got" != "$want" ]; then
+            echo "actionlint $version failed SHA-256 verification (expected $want, got $got)" >&2
+            exit 1
+          fi
+          tar xzf actionlint.tar.gz actionlint
+          rm -f actionlint.tar.gz
           ./actionlint --version
           shellcheck --version
 
@@ -42,7 +56,17 @@ jobs:
 
       # actionlint reads the workflows; the action's own logic lives in
       # scripts/ precisely so that it can be checked directly.
-      - run: shellcheck scripts/*.sh
+      - run: shellcheck scripts/*.sh .github/fixtures/comment/check.sh
+
+  # No database, no pull request, no token. The comment body builder is the
+  # part of this action a hostile branch can reach — a plan echoes the DDL it
+  # was given — so it is checked against fixtures that try to escape it.
+  comment-body:
+    name: Comment body
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash .github/fixtures/comment/check.sh
 
   install:
     name: Install on ${{ matrix.runner }}
@@ -151,6 +175,18 @@ jobs:
           ref: v${{ env.PGPUSHY_VERSION }}
           path: pgpushy-src
 
+      # Read once, from the example's own configuration, and used both to
+      # write the CI config and to create the schemas: a list that disagreed
+      # with itself would make this job pass against the wrong database shape.
+      - name: Read the managed schemas out of the example
+        run: |
+          set -euo pipefail
+          schemas=$(sed -n 's/^managed_schemas *= *\[\(.*\)\]/\1/p' "$PROJECT/pgpushy.toml" \
+            | tr -d '" ' | tr ',' ' ')
+          test -n "$schemas"
+          echo "managed schemas: $schemas"
+          echo "MANAGED_SCHEMAS=$schemas" >> "$GITHUB_ENV"
+
       # A config beside the example's own, so `source_root`, `seed_root` and
       # `managed_schemas` still resolve against the example directory — paths
       # inside pgpushy.toml resolve against the file's own directory, which is
@@ -163,10 +199,12 @@ jobs:
       - name: Write the CI configuration
         run: |
           set -euo pipefail
-          cat > "$PROJECT/pgpushy.ci.toml" <<'TOML'
+          read -ra schema_list <<< "$MANAGED_SCHEMAS"
+          managed=$(printf '"%s", ' "${schema_list[@]}")
+          cat > "$PROJECT/pgpushy.ci.toml" <<TOML
           source_root     = "db/schema"
           default_schema  = "app"
-          managed_schemas = ["app", "billing", "snowdrop"]
+          managed_schemas = [${managed%, }]
           exclude         = ["**/*.draft.sql"]
           seed_root       = "db/seeds"
 
@@ -199,12 +237,10 @@ jobs:
       - name: Create the target databases and their managed schemas
         run: |
           set -euo pipefail
-          schemas=$(sed -n 's/^managed_schemas *= *\[\(.*\)\]/\1/p' "$PROJECT/pgpushy.toml" \
-            | tr -d '" ' | tr ',' ' ')
-          echo "managed schemas: $schemas"
+          read -ra schema_list <<< "$MANAGED_SCHEMAS"
           for db in shop shop_other; do
             psql -h localhost -U postgres -d postgres -c "CREATE DATABASE $db"
-            for schema in $schemas; do
+            for schema in "${schema_list[@]}"; do
               psql -h localhost -U postgres -d "$db" -c "CREATE SCHEMA \"$schema\""
             done
           done
@@ -232,9 +268,51 @@ jobs:
       - name: The offline commands succeeded and claimed nothing about destruction
         run: |
           set -euo pipefail
+          test "${{ steps.validate.outcome }}" = "success"
           test "${{ steps.validate.outputs.exit-code }}" = "0"
           test -z "${{ steps.validate.outputs.destructive }}"
+          test "${{ steps.generate-check.outcome }}" = "success"
           test "${{ steps.generate-check.outputs.exit-code }}" = "0"
+
+      # A check that only ever passes is not a check. Both offline commands
+      # are run again against a tree they must reject, in copies, so the
+      # project the rest of this job plans against stays the real one.
+      - name: Break a copy of each project
+        run: |
+          set -euo pipefail
+          cp -r "$PROJECT" pgpushy-src/example-invalid
+          # A view is outside pgpushy's statement set, so discovery refuses it.
+          echo 'CREATE VIEW busted AS SELECT 1 AS x;' \
+            > pgpushy-src/example-invalid/db/schema/app/busted.sql
+          cp -r .github/fixtures/generate generate-drift
+          # The generator's input moves; the vendored output does not.
+          echo '-- a dependency changed what it emits' >> generate-drift/widgets.sql.in
+
+      - id: validate-invalid
+        continue-on-error: true
+        uses: ./
+        with:
+          command: validate
+          version: ${{ env.PGPUSHY_VERSION }}
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example-invalid
+
+      - id: generate-check-stale
+        continue-on-error: true
+        uses: ./
+        with:
+          command: generate-check
+          version: ${{ env.PGPUSHY_VERSION }}
+          working-directory: generate-drift
+
+      - name: A rejected tree and a stale generated source both exit 1
+        run: |
+          set -euo pipefail
+          test "${{ steps.validate-invalid.outcome }}" = "failure"
+          test "${{ steps.validate-invalid.outputs.exit-code }}" = "1"
+          test "${{ steps.generate-check-stale.outcome }}" = "failure"
+          test "${{ steps.generate-check-stale.outputs.exit-code }}" = "1"
+          rm -rf pgpushy-src/example-invalid generate-drift
 
       # 2. Plan. The first pgpushy run that needs a target is also the first
       # that needs pgschema, which it downloads and verifies itself.
@@ -250,16 +328,20 @@ jobs:
           config: pgpushy.ci.toml
           working-directory: pgpushy-src/example
           plan-out: ./plan
-          # A fork's token cannot comment, so asking it to would fail the run
-          # for a reason that has nothing to do with the change. On a push
-          # this stays true and the action reports that it has nowhere to post.
-          comment: ${{ !github.event.pull_request.head.repo.fork }}
+          # One leg only: both legs of this matrix plan the same environment,
+          # so both would find the same marker and race to edit one comment.
+          # And a fork's token cannot comment at all, so asking it to would
+          # fail the run for a reason that has nothing to do with the change.
+          # On a push this stays true on one leg and the action reports that
+          # it has nowhere to post.
+          comment: ${{ matrix.runner == 'ubuntu-latest' && !github.event.pull_request.head.repo.fork }}
 
       - run: echo "T_PLAN_1_END=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: The plan is clean and wrote an artifact
         run: |
           set -euo pipefail
+          test "${{ steps.plan.outcome }}" = "success"
           test "${{ steps.plan.outputs.exit-code }}" = "0"
           test "${{ steps.plan.outputs.destructive }}" = "false"
           test -f "$PROJECT/plan/manifest.json"
@@ -296,7 +378,7 @@ jobs:
           config: pgpushy.ci.toml
           working-directory: pgpushy-src/example
           plan-out: ./plan
-          comment: ${{ !github.event.pull_request.head.repo.fork }}
+          comment: ${{ matrix.runner == 'ubuntu-latest' && !github.event.pull_request.head.repo.fork }}
 
       - run: echo "T_PLAN_2_END=$(date +%s)" >> "$GITHUB_ENV"
 
@@ -308,7 +390,7 @@ jobs:
           test "$(jq -r '.total.steps' "$PROJECT/plan/summary.json")" = "0"
 
       - name: One comment per environment, edited in place
-        if: github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
+        if: matrix.runner == 'ubuntu-latest' && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
@@ -340,6 +422,10 @@ jobs:
       - name: The artifact was refused, by identity
         run: |
           set -euo pipefail
+          # The step failed, and only continue-on-error let the job carry on:
+          # an action that reported the refusal in an output while exiting 0
+          # would be worse than useless.
+          test "${{ steps.wrong-target.outcome }}" = "failure"
           test "${{ steps.wrong-target.outputs.exit-code }}" = "1"
           # The log path run.sh writes; asserting on the message and not just
           # the code is the point, because exit 1 covers every refusal.
@@ -366,6 +452,7 @@ jobs:
       - name: A destructive plan exits 2 and says so
         run: |
           set -euo pipefail
+          test "${{ steps.destructive.outcome }}" = "failure"
           test "${{ steps.destructive.outputs.exit-code }}" = "2"
           test "${{ steps.destructive.outputs.destructive }}" = "true"
           # Exit 2 still writes the artifact: it is what the reviewer gates on.
@@ -389,6 +476,7 @@ jobs:
       - name: allow_destructive turns exit 2 into exit 0 and nothing else
         run: |
           set -euo pipefail
+          test "${{ steps.destructive-allowed.outcome }}" = "success"
           test "${{ steps.destructive-allowed.outputs.exit-code }}" = "0"
           test "${{ steps.destructive-allowed.outputs.destructive }}" = "true"
           test "$(jq -r '.total.destructive' "$PROJECT/plan-allowed/summary.json")" = "2"

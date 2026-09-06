@@ -19,6 +19,10 @@ Marketplace and every `uses:` line read the repository at a git ref.
    tag already exists; then it tags `vX.Y.Z`, force-moves `vX`, and pushes
    both.
 
+A Marketplace listing is out of scope for now. A release is the two tags, and
+`uses: arcanyx-pub/pgpushy-action@v1` resolves against the repository whether
+or not the action is listed.
+
 ## Why the major tag moves
 
 `vX.Y.Z` is immutable and is what an audit reads. `vX` is what consumers
