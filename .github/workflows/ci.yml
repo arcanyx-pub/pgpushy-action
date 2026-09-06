@@ -1,0 +1,412 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The pgpushy release every job installs. One place, because the e2e job
+  # also checks out the pgpushy repository at the matching tag for its
+  # example project, and a plan computed by one version against another
+  # version's example would be testing nothing in particular.
+  PGPUSHY_VERSION: "0.3.2"
+
+jobs:
+  lint:
+    name: actionlint & shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned, and fetched as a binary rather than run through a third-party
+      # action: this repository's whole subject is that a downloaded binary in
+      # CI is a supply-chain step, and it would be odd to be casual about it
+      # here. actionlint shells out to shellcheck for `run:` bodies, and
+      # shellcheck is already on the runner image.
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          version=1.7.12
+          curl --fail --silent --show-error --location \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz" \
+            | tar xz actionlint
+          ./actionlint --version
+          shellcheck --version
+
+      - run: ./actionlint -color
+
+      # actionlint reads the workflows; the action's own logic lives in
+      # scripts/ precisely so that it can be checked directly.
+      - run: shellcheck scripts/*.sh
+
+  install:
+    name: Install on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # A macOS runner that fails to provision should not cancel the legs that
+      # had nothing to do with it.
+      fail-fast: false
+      matrix:
+        # The four platforms pgpushy publishes binaries for. macOS runner
+        # labels split by architecture rather than version: `macos-latest` is
+        # Apple Silicon, and Intel needs `macos-15-intel`.
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: setup
+        uses: ./
+        with:
+          command: setup
+          version: ${{ env.PGPUSHY_VERSION }}
+
+      - name: pgpushy is on PATH and is the version that was asked for
+        env:
+          BINARY: ${{ steps.setup.outputs.pgpushy-path }}
+        run: |
+          set -euo pipefail
+          test "$(pgpushy --version)" = "pgpushy $PGPUSHY_VERSION"
+          test -x "$BINARY"
+          test "$(command -v pgpushy)" = "$BINARY"
+          test "${{ steps.setup.outputs.exit-code }}" = "0"
+          test -z "${{ steps.setup.outputs.destructive }}"
+
+      # The tool cache is meant to make the second install a re-verification
+      # rather than a download, and the cheapest proof of that is the file not
+      # being rewritten. `stat -c` is GNU, so this leg is Linux only.
+      - name: Note when the cached binary was written
+        if: runner.os == 'Linux'
+        env:
+          BINARY: ${{ steps.setup.outputs.pgpushy-path }}
+        run: echo "CACHED_MTIME=$(stat -c %Y "$BINARY")" >> "$GITHUB_ENV"
+
+      - name: Install again
+        if: runner.os == 'Linux'
+        uses: ./
+        with:
+          command: setup
+          version: ${{ env.PGPUSHY_VERSION }}
+
+      - name: The second install reused the tool cache
+        if: runner.os == 'Linux'
+        env:
+          BINARY: ${{ steps.setup.outputs.pgpushy-path }}
+        run: |
+          set -euo pipefail
+          now=$(stat -c %Y "$BINARY")
+          if [ "$now" != "$CACHED_MTIME" ]; then
+            echo "$BINARY was rewritten; the second install downloaded instead of verifying" >&2
+            exit 1
+          fi
+          echo "the second install re-verified the cached binary"
+
+  e2e:
+    name: End to end on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    permissions:
+      contents: read
+      # For the plan comment. A fork's pull_request token is read-only
+      # whatever this says, which is why the comment input below is
+      # conditional on the head repository.
+      pull-requests: write
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # pgpushy reads PGPASSWORD and nothing else from the environment: PG*
+      # variables must not override a named environment's target (spec §10.2),
+      # and the password is the one exception, because a secret does not
+      # belong in a version-controlled file.
+      PGPASSWORD: postgres
+      PROJECT: pgpushy-src/example
+    steps:
+      - uses: actions/checkout@v7
+
+      # The example project is a complete pgpushy project — three managed
+      # schemas, seeds, generated sources — and pinning it to the same tag as
+      # the binary keeps this a test of the action rather than of whatever
+      # main happens to hold.
+      - name: Check out the pgpushy example project
+        uses: actions/checkout@v7
+        with:
+          repository: arcanyx-pub/pgpushy
+          ref: v${{ env.PGPUSHY_VERSION }}
+          path: pgpushy-src
+
+      # A config beside the example's own, so `source_root`, `seed_root` and
+      # `managed_schemas` still resolve against the example directory — paths
+      # inside pgpushy.toml resolve against the file's own directory, which is
+      # what makes --config select a project rather than a file.
+      #
+      # Three environments: the target, a second database for the wrong-target
+      # test, and the same target with destruction permitted. `allow_destructive`
+      # is per-environment on purpose (spec §10.2) and has no flag, so the only
+      # way to test both sides is two blocks.
+      - name: Write the CI configuration
+        run: |
+          set -euo pipefail
+          cat > "$PROJECT/pgpushy.ci.toml" <<'TOML'
+          source_root     = "db/schema"
+          default_schema  = "app"
+          managed_schemas = ["app", "billing", "snowdrop"]
+          exclude         = ["**/*.draft.sql"]
+          seed_root       = "db/seeds"
+
+          [env.ci]
+          db   = "shop"
+          user = "postgres"
+
+          [env.other]
+          db   = "shop_other"
+          user = "postgres"
+          TOML
+          sed 's/^\[env.ci\]$/[env.ci]\nallow_destructive = true/' \
+            "$PROJECT/pgpushy.ci.toml" > "$PROJECT/pgpushy.allow.toml"
+          cat "$PROJECT/pgpushy.ci.toml"
+
+      # The Ubuntu images carry a psql, but not identically across
+      # architectures, and the target schemas have to be created by something.
+      - name: Make sure psql is available
+        run: |
+          set -euo pipefail
+          if ! command -v psql > /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+          fi
+          psql --version
+
+      # pgpushy issues no DDL of its own against the target, so a managed
+      # schema must already exist (spec §6.1). The list is read out of the
+      # example's own configuration rather than written twice.
+      - name: Create the target databases and their managed schemas
+        run: |
+          set -euo pipefail
+          schemas=$(sed -n 's/^managed_schemas *= *\[\(.*\)\]/\1/p' "$PROJECT/pgpushy.toml" \
+            | tr -d '" ' | tr ',' ' ')
+          echo "managed schemas: $schemas"
+          for db in shop shop_other; do
+            psql -h localhost -U postgres -d postgres -c "CREATE DATABASE $db"
+            for schema in $schemas; do
+              psql -h localhost -U postgres -d "$db" -c "CREATE SCHEMA \"$schema\""
+            done
+          done
+
+      # 1. Offline checks.
+
+      - id: validate
+        uses: ./
+        with:
+          command: validate
+          version: ${{ env.PGPUSHY_VERSION }}
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+
+      # `generate-check` runs against this repository's own fixture, not the
+      # example: the example's generators build a Rust crate, which is a test
+      # of cargo rather than of the action.
+      - id: generate-check
+        uses: ./
+        with:
+          command: generate-check
+          version: ${{ env.PGPUSHY_VERSION }}
+          working-directory: .github/fixtures/generate
+
+      - name: The offline commands succeeded and claimed nothing about destruction
+        run: |
+          set -euo pipefail
+          test "${{ steps.validate.outputs.exit-code }}" = "0"
+          test -z "${{ steps.validate.outputs.destructive }}"
+          test "${{ steps.generate-check.outputs.exit-code }}" = "0"
+
+      # 2. Plan. The first pgpushy run that needs a target is also the first
+      # that needs pgschema, which it downloads and verifies itself.
+
+      - run: echo "T_PLAN_1=$(date +%s)" >> "$GITHUB_ENV"
+
+      - id: plan
+        uses: ./
+        with:
+          command: plan
+          version: ${{ env.PGPUSHY_VERSION }}
+          env: ci
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+          plan-out: ./plan
+          # A fork's token cannot comment, so asking it to would fail the run
+          # for a reason that has nothing to do with the change. On a push
+          # this stays true and the action reports that it has nowhere to post.
+          comment: ${{ !github.event.pull_request.head.repo.fork }}
+
+      - run: echo "T_PLAN_1_END=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: The plan is clean and wrote an artifact
+        run: |
+          set -euo pipefail
+          test "${{ steps.plan.outputs.exit-code }}" = "0"
+          test "${{ steps.plan.outputs.destructive }}" = "false"
+          test -f "$PROJECT/plan/manifest.json"
+          test -f "$PROJECT/plan/summary.json"
+          test "$(jq -r '.total.destructive' "$PROJECT/plan/summary.json")" = "0"
+          test "$(jq -r '.total.steps' "$PROJECT/plan/summary.json")" -gt 0
+
+      # 3. Apply exactly that artifact.
+
+      - id: apply
+        uses: ./
+        with:
+          command: apply
+          version: ${{ env.PGPUSHY_VERSION }}
+          env: ci
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+          plan: ./plan
+
+      - run: test "${{ steps.apply.outputs.exit-code }}" = "0"
+
+      # 4. Plan again. The project converges, so the second plan is empty —
+      # and on a pull request it edits the first comment rather than adding
+      # a second.
+
+      - run: echo "T_PLAN_2=$(date +%s)" >> "$GITHUB_ENV"
+
+      - id: replan
+        uses: ./
+        with:
+          command: plan
+          version: ${{ env.PGPUSHY_VERSION }}
+          env: ci
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+          plan-out: ./plan
+          comment: ${{ !github.event.pull_request.head.repo.fork }}
+
+      - run: echo "T_PLAN_2_END=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: The re-plan is empty
+        run: |
+          set -euo pipefail
+          test "${{ steps.replan.outputs.exit-code }}" = "0"
+          test "${{ steps.replan.outputs.destructive }}" = "false"
+          test "$(jq -r '.total.steps' "$PROJECT/plan/summary.json")" = "0"
+
+      - name: One comment per environment, edited in place
+        if: github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          count=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
+            | jq -r 'if type == "array" then .[] else empty end
+                     | select(.body // "" | contains("<!-- pgpushy-action plan env=ci -->")) | .id' \
+            | wc -l)
+          echo "comments carrying the env=ci marker: $count"
+          test "$count" = "1"
+
+      # 5. The wrong target. The artifact was planned against shop; `other`
+      # reaches a different database on the same cluster, which is the case
+      # pgschema's own fingerprint is silent about and the reason the manifest
+      # records an identity at all (spec §8.9).
+
+      - id: wrong-target
+        continue-on-error: true
+        uses: ./
+        with:
+          command: apply
+          version: ${{ env.PGPUSHY_VERSION }}
+          env: other
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+          plan: ./plan
+
+      - name: The artifact was refused, by identity
+        run: |
+          set -euo pipefail
+          test "${{ steps.wrong-target.outputs.exit-code }}" = "1"
+          # The log path run.sh writes; asserting on the message and not just
+          # the code is the point, because exit 1 covers every refusal.
+          grep -q "planned against" "$RUNNER_TEMP/pgpushy-apply.log"
+          grep -qi "shop_other" "$RUNNER_TEMP/pgpushy-apply.log"
+
+      # 6. Destruction. Deleting teams.sql removes app.teams and
+      # app.employees, which reference each other and nothing else references.
+
+      - name: Remove a table from the desired state
+        run: rm "$PROJECT/db/schema/app/teams.sql"
+
+      - id: destructive
+        continue-on-error: true
+        uses: ./
+        with:
+          command: plan
+          version: ${{ env.PGPUSHY_VERSION }}
+          env: ci
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+          plan-out: ./plan-destructive
+
+      - name: A destructive plan exits 2 and says so
+        run: |
+          set -euo pipefail
+          test "${{ steps.destructive.outputs.exit-code }}" = "2"
+          test "${{ steps.destructive.outputs.destructive }}" = "true"
+          # Exit 2 still writes the artifact: it is what the reviewer gates on.
+          test "$(jq -r '.total.destructive' "$PROJECT/plan-destructive/summary.json")" = "2"
+          jq -e '[.destructive[].path] | index("app.teams")' \
+            "$PROJECT/plan-destructive/summary.json" > /dev/null
+
+      # The same plan against an environment that permits destruction: exit 0,
+      # and still destructive. The output is a fact about the plan, not about
+      # whether the run was allowed to proceed.
+      - id: destructive-allowed
+        uses: ./
+        with:
+          command: plan
+          version: ${{ env.PGPUSHY_VERSION }}
+          env: ci
+          config: pgpushy.allow.toml
+          working-directory: pgpushy-src/example
+          plan-out: ./plan-allowed
+
+      - name: allow_destructive turns exit 2 into exit 0 and nothing else
+        run: |
+          set -euo pipefail
+          test "${{ steps.destructive-allowed.outputs.exit-code }}" = "0"
+          test "${{ steps.destructive-allowed.outputs.destructive }}" = "true"
+          test "$(jq -r '.total.destructive' "$PROJECT/plan-allowed/summary.json")" = "2"
+
+      # What this costs, so the question of whether to cache pgschema's
+      # download can be answered from numbers rather than from taste. The
+      # pgpushy download reports its own time in the install step's log.
+      - name: Timings
+        if: always()
+        run: |
+          set -euo pipefail
+          first=$(( ${T_PLAN_1_END:-0} - ${T_PLAN_1:-0} ))
+          second=$(( ${T_PLAN_2_END:-0} - ${T_PLAN_2:-0} ))
+          {
+            echo "| what | seconds |"
+            echo "| --- | --- |"
+            echo "| first plan (includes pgpushy's pgschema download) | $first |"
+            echo "| second plan (pgschema already cached) | $second |"
+            echo "| the difference, roughly the pgschema fetch | $(( first - second )) |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          du -sh ~/.cache/pgpushy || true

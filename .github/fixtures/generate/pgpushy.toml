@@ -1,0 +1,12 @@
+# A one-table project whose generator is `cat`, so `generate-check` can be
+# exercised without the toolchain a real generator would bring. The example
+# project in the pgpushy repository generates its SQL from a Rust crate; that
+# is the shape worth documenting and the wrong thing to build a CI job on.
+
+source_root     = "schema"
+default_schema  = "app"
+managed_schemas = ["app"]
+
+[[generate]]
+output  = "schema/widgets.sql"
+command = ["cat", "widgets.sql.in"]
