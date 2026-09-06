@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 #
-# Run one pgpushy command and record what it did, without ever failing.
+# Run one pgpushy command and record what it did.
 #
-# The exit code is the whole point of the contract (spec §9.1) — 2 is a valid
-# plan that would drop something, and routes to a different person than 1 —
-# so it has to reach the caller as an output whatever it is. This script
-# therefore always succeeds, writes the code, and leaves failing the step to
-# the last step in action.yml. That ordering is not a style choice: outputs
-# written by a step that then exits non-zero are not something to bet a
-# destructive-change gate on.
+# This script fails only on the action's own errors, never on pgpushy's exit
+# code. That code is the whole point of the contract (spec §9.1) — 2 is a
+# valid plan that would drop something, and routes to a different person than
+# 1 — so it has to reach the caller as an output whatever it is. It is written
+# to $GITHUB_OUTPUT here and failing on it is left to the last step in
+# action.yml. That ordering is not a style choice: outputs written by a step
+# that then exits non-zero are not something to bet a destructive-change gate
+# on.
 
 set -euo pipefail
 
@@ -27,6 +28,8 @@ if [ "$COMMAND" = setup ]; then
     exit 0
 fi
 
+# Checked in inputs.sh, before anything was downloaded; this is the same
+# check at the point of use.
 cd "$WORKING_DIRECTORY" || fail "working-directory '$WORKING_DIRECTORY' does not exist"
 
 # Outside the workspace, so a captured plan never lands in the source tree a
@@ -47,7 +50,9 @@ case "$COMMAND" in
         # `destructive` output and the PR comment are read from. Unasked-for
         # artifacts go to the runner's temp directory, so they neither appear
         # in the workspace nor outlive the job.
-        plan_dir="${PLAN_OUT:-$RUNNER_TEMP/pgpushy-plan}"
+        # Per environment, so two plans in one job cannot read each other's
+        # artifact through a shared default path.
+        plan_dir="${PLAN_OUT:-$RUNNER_TEMP/pgpushy-plan-$PGPUSHY_ENV}"
         args=(plan --env "$PGPUSHY_ENV" --plan-out "$plan_dir")
         ;;
     apply)
@@ -83,14 +88,25 @@ set -e
 } >>"$GITHUB_OUTPUT"
 
 if [ "$COMMAND" = plan ]; then
-    # Absolute from here on: the paths a consumer gives are relative to
-    # working-directory, and the comment script runs from somewhere else.
-    plan_dir=$(cd "$plan_dir" 2>/dev/null && pwd || true)
-    summary="${plan_dir:+$plan_dir/summary.json}"
+    destructive=false
+    artifact=""
 
-    # A refused plan writes no artifact (spec §8.9) — a cycle cannot be
+    # Only a run that got as far as classifying wrote an artifact. A refused
+    # plan writes none (spec §8.9) — a cross-schema cycle cannot be
     # re-detected without the source tree, so pgpushy never mints one — and
-    # nothing was classified as destructive because nothing got that far.
+    # the directory it was asked to write into may still hold an *earlier*
+    # artifact, from a previous run or a previous environment. Reading that
+    # one would report a destructive finding, and comment a plan, that this
+    # run did not produce.
+    case "$code" in
+        0 | 2)
+            # Absolute from here on: the paths a consumer gives are relative
+            # to working-directory, and the comment script runs elsewhere.
+            artifact=$(cd "$plan_dir" 2>/dev/null && pwd || true)
+            ;;
+    esac
+
+    summary="${artifact:+$artifact/summary.json}"
     if [ -n "$summary" ] && [ -f "$summary" ]; then
         destructive_count=$(jq -r '.total.destructive' "$summary")
     else
@@ -101,13 +117,11 @@ if [ "$COMMAND" = plan ]; then
     # the impossible case of an artifact that says otherwise.
     if [ "$code" = 2 ] || [ "$destructive_count" -gt 0 ]; then
         destructive=true
-    else
-        destructive=false
     fi
 
     {
         echo "destructive=$destructive"
-        echo "plan-dir=$plan_dir"
+        echo "plan-dir=$artifact"
     } >>"$GITHUB_OUTPUT"
     echo "pgpushy exited $code; destructive=$destructive"
 else

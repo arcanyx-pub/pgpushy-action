@@ -1,0 +1,5 @@
+{"version":1,"target":{"database":"shop","system_identifier":"1"},
+ "schemas":[{"schema":"app","steps":2,"destructive":2}],
+ "destructive":[{"schema":"app","kind":"drop.table","path":"app.teams"},
+                {"schema":"app","kind":"drop.table.column","path":"app.orders.note"}],
+ "total":{"steps":2,"destructive":2}}

@@ -1,0 +1,4 @@
+error: unsupported statement: CREATE VIEW
+  at app/busted.sql:1
+
+1 problem found in the source tree

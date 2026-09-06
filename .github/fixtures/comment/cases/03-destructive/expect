@@ -1,0 +1,4 @@
+### ⚠️ Destructive changes for `prod` (blocked: `allow_destructive` is not set for this environment)
+**Destructive steps (2):**
+drop.table	app.teams
+drop.table.column	app.orders.note

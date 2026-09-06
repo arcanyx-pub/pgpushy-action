@@ -20,4 +20,7 @@ major version is what consumers pin, since `@v1` is a tag that moves.
 - `exit-code` and `destructive` outputs, so a workflow can route on a
   destructive plan (exit 2) instead of stopping on it.
 - `comment: true`: one plan comment per environment on a pull request, edited
-  in place.
+  in place. Plan output is fenced with a fence sized to its own content and
+  stripped of control characters, so a branch under review cannot break out of
+  the code block and write in the action's voice; only comments this action
+  wrote are edited.

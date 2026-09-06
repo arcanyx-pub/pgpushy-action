@@ -1,0 +1,2 @@
+### 1 step across 1 schema for `prod`
+This environment sets `allow_destructive = true`, so the plan is not blocked.

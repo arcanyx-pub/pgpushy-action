@@ -1,0 +1,5 @@
+  plan --env prod
+
+DROP TABLE IF EXISTS teams CASCADE;
+
+plan contains 2 destructive changes

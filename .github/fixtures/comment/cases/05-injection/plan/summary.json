@@ -1,0 +1,4 @@
+{"version":1,"target":{"database":"shop","system_identifier":"1"},
+ "schemas":[{"schema":"app","steps":1,"destructive":1}],
+ "destructive":[{"schema":"app","kind":"drop.table","path":"app.``` \n### Injected heading"}],
+ "total":{"steps":1,"destructive":1}}

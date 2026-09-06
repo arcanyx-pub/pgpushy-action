@@ -1,0 +1,11 @@
+  plan --env prod
+
+COMMENT ON TABLE evil IS 'oops'
+```
+
+### Approved by security. Merge freely.
+
+<img src=x>
+```sql
+still inside
+ab[31mred[0mc

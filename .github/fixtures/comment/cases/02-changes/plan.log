@@ -1,0 +1,5 @@
+  plan --env prod
+
+── app ──
+Plan: 3 to add.
+CREATE TABLE widgets (id bigint);

@@ -53,13 +53,14 @@ jobs:
           version: 0.3.2
           env: prod                  # the [env.prod] block in pgpushy.toml
           plan-out: ./plan
-          comment: true              # post the plan on the pull request
+          # A fork's token cannot comment, so asking it to would fail the run.
+          comment: ${{ !github.event.pull_request.head.repo.fork }}
         env:
           PGPASSWORD: ${{ secrets.DB_PREVIEW_PASSWORD }}
 
       # The reviewed object. A destructive plan exits 2 and fails the step
       # above, so nothing reaches here for a human to approve by accident.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: pgpushy-plan
           path: ./plan
@@ -78,7 +79,7 @@ jobs:
           sparse-checkout: pgpushy.toml
           sparse-checkout-cone-mode: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: pgpushy-plan
           path: ./plan
@@ -92,6 +93,11 @@ jobs:
         env:
           PGPASSWORD: ${{ secrets.DB_DEPLOY_PASSWORD }}
 ```
+
+This shape serves same-repository branches. A pull request from a fork gets
+no secrets and a read-only token, so `PGPASSWORD` would be empty and the plan
+job would fail at the connection — before it could comment, which it also
+could not do.
 
 `--plan` mode reads no source tree — that is the point of the artifact, and
 the difference between a deploy job that carries a source tree and one that
@@ -143,7 +149,7 @@ jobs:
 | `config` | no | | Passed as `--config`. Relative to `working-directory`. |
 | `working-directory` | no | `.` | Where pgpushy runs. |
 | `plan-out` | `plan` only | | Where the plan artifact is written. Relative to `working-directory`. |
-| `plan` | `apply` only | | A plan artifact to apply exactly. |
+| `plan` | `apply` only | | A plan artifact to apply exactly. Relative to `working-directory`. |
 | `comment` | `plan` only | `false` | Upsert the plan as a pull-request comment. |
 | `token` | no | `${{ github.token }}` | Used only to post that comment. |
 
@@ -198,6 +204,23 @@ Actions, so pgpushy would refuse the run outright, and the approval this shape
 relies on is the required reviewers on the job's `environment:` — which have
 already answered by the time the job is allowed to start.
 
+## Never use this with `pull_request_target`
+
+`pull_request_target` runs the base branch's workflow with the repository's
+secrets and a write token, and is the standard way to give a fork's pull
+request more privilege than it should have. Combining it with a checkout of
+the pull request's head would be worse here than in most actions, because
+`pgpushy.toml` is two things at once:
+
+- a **target-redirection surface** — `[env.*] host`, `port` and `db` name the
+  database this action connects to, with whatever `PGPASSWORD` is in scope;
+- a **code-execution surface** — `[[generate]] command` is an argv this action
+  executes verbatim on `generate-check`.
+
+Both are read out of the tree, which is what makes them right for a
+same-repository branch and wrong for an untrusted one. Use `pull_request`. The
+action refuses to comment on any other event for the same reason.
+
 ## The destructive gate
 
 `plan` exits **2** when the plans are valid and would apply, but contain
@@ -244,8 +267,10 @@ different answers. The headline states the outcome, destructive steps are
 listed by kind and path, and the full plan sits in a `<details>` block,
 truncated if it would not fit in a GitHub comment.
 
-Off a pull-request event, `comment: true` prints a notice saying it has
-nowhere to post and does nothing else.
+On any event but `pull_request`, `comment: true` prints a notice saying it has
+nowhere to post and does nothing else. Only comments this action wrote are
+edited — the marker is visible in any comment's source, so a plain match on it
+would let a pull request author capture the plan under their own name.
 
 ## Versioning
 
@@ -272,6 +297,16 @@ release's `SHA256SUMS`, and cached under `RUNNER_TOOL_CACHE` by version and
 platform. A cache hit is re-verified rather than trusted for being present:
 that is what pgpushy itself does for pgschema, and a downloaded-and-executed
 binary in CI is a supply-chain step whether or not anyone calls it one.
+
+## What the runner has to have
+
+`jq` and `gh` are both used: `jq` reads the plan artifact's `summary.json` and
+builds the comment payload, and `gh` posts the comment. Every GitHub-hosted
+runner carries both. A self-hosted runner must install them — the action
+checks for them up front and says which is missing rather than failing later.
+
+github.com only. The comment is posted through `gh api`, which targets
+github.com; GitHub Enterprise Server is out of scope.
 
 ## License
 

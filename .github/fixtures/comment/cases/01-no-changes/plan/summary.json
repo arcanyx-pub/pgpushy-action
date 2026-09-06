@@ -1,0 +1,3 @@
+{"version":1,"target":{"database":"shop","system_identifier":"1"},
+ "schemas":[{"schema":"app","steps":0,"destructive":0}],
+ "destructive":[],"total":{"steps":0,"destructive":0}}

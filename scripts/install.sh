@@ -17,6 +17,7 @@ fail() {
 }
 
 : "${VERSION:?}" "${RUNNER_OS:?}" "${RUNNER_ARCH:?}"
+: "${RUNNER_TOOL_CACHE:?}" "${GITHUB_PATH:?}" "${GITHUB_OUTPUT:?}"
 version="${VERSION#v}"
 
 # pgpushy publishes binaries for the platforms pgschema does, which is what
@@ -45,24 +46,28 @@ sha256_of() {
     fi
 }
 
-work=$(mktemp -d)
+dir="$RUNNER_TOOL_CACHE/pgpushy/$version/$platform"
+binary="$dir/pgpushy"
+mkdir -p "$dir"
+
+# Under the tool cache rather than in /tmp, so that the move into place at the
+# end is a rename within one filesystem and therefore atomic. A partially
+# copied binary that a later job found and ran is the failure this avoids.
+work=$(mktemp -d "$RUNNER_TOOL_CACHE/pgpushy/.tmp.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
 # The release's SHA256SUMS is the authority, so it is fetched on every run,
 # cache hit or not: the check is only worth making against a hash that was not
 # stored beside the thing it verifies.
 started=$SECONDS
-curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
+curl --proto '=https' --proto-redir '=https' \
+    --fail --silent --show-error --location --retry 3 --retry-delay 2 \
     "$base/SHA256SUMS" -o "$work/SHA256SUMS" ||
     fail "could not fetch $base/SHA256SUMS — is $version a released pgpushy version?"
 
 # sha256sum format, bare filenames: "<hex>  <name>".
-expected=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1 }' "$work/SHA256SUMS")
+expected=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1; exit }' "$work/SHA256SUMS")
 [ -n "$expected" ] || fail "SHA256SUMS for v$version lists no $asset"
-
-dir="$RUNNER_TOOL_CACHE/pgpushy/$version/$platform"
-binary="$dir/pgpushy"
-mkdir -p "$dir"
 
 if [ -f "$binary" ] && [ "$(sha256_of "$binary")" = "$expected" ]; then
     echo "pgpushy $version ($platform) is already in the tool cache and still verifies"
@@ -72,7 +77,8 @@ else
     # release says it is".
     [ ! -f "$binary" ] || echo "::warning::cached $binary does not match SHA256SUMS; re-downloading"
     echo "Downloading $base/$asset"
-    curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
+    curl --proto '=https' --proto-redir '=https' \
+        --fail --silent --show-error --location --retry 3 --retry-delay 2 \
         "$base/$asset" -o "$work/$asset" ||
         fail "could not download $base/$asset"
 
