@@ -298,6 +298,12 @@ platform. A cache hit is re-verified rather than trusted for being present:
 that is what pgpushy itself does for pgschema, and a downloaded-and-executed
 binary in CI is a supply-chain step whether or not anyone calls it one.
 
+pgschema is not cached by the action. pgpushy downloads and verifies it on the
+first run that needs a target, into `~/.cache/pgpushy`, and measured on hosted
+runners a plan takes the same time with and without that fetch already done:
+GitHub's release CDN is as fast as a cache restore, so a cache step would add
+a post-job step and a failure mode and save nothing.
+
 ## What the runner has to have
 
 `jq` and `gh` are both used: `jq` reads the plan artifact's `summary.json` and

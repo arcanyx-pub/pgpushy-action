@@ -317,8 +317,6 @@ jobs:
       # 2. Plan. The first pgpushy run that needs a target is also the first
       # that needs pgschema, which it downloads and verifies itself.
 
-      - run: echo "T_PLAN_1=$(date +%s)" >> "$GITHUB_ENV"
-
       - id: plan
         uses: ./
         with:
@@ -335,8 +333,6 @@ jobs:
           # On a push this stays true on one leg and the action reports that
           # it has nowhere to post.
           comment: ${{ matrix.runner == 'ubuntu-latest' && !github.event.pull_request.head.repo.fork }}
-
-      - run: echo "T_PLAN_1_END=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: The plan is clean and wrote an artifact
         run: |
@@ -367,8 +363,6 @@ jobs:
       # and on a pull request it edits the first comment rather than adding
       # a second.
 
-      - run: echo "T_PLAN_2=$(date +%s)" >> "$GITHUB_ENV"
-
       - id: replan
         uses: ./
         with:
@@ -379,8 +373,6 @@ jobs:
           working-directory: pgpushy-src/example
           plan-out: ./plan
           comment: ${{ matrix.runner == 'ubuntu-latest' && !github.event.pull_request.head.repo.fork }}
-
-      - run: echo "T_PLAN_2_END=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: The re-plan is empty
         run: |
@@ -480,21 +472,3 @@ jobs:
           test "${{ steps.destructive-allowed.outputs.exit-code }}" = "0"
           test "${{ steps.destructive-allowed.outputs.destructive }}" = "true"
           test "$(jq -r '.total.destructive' "$PROJECT/plan-allowed/summary.json")" = "2"
-
-      # What this costs, so the question of whether to cache pgschema's
-      # download can be answered from numbers rather than from taste. The
-      # pgpushy download reports its own time in the install step's log.
-      - name: Timings
-        if: always()
-        run: |
-          set -euo pipefail
-          first=$(( ${T_PLAN_1_END:-0} - ${T_PLAN_1:-0} ))
-          second=$(( ${T_PLAN_2_END:-0} - ${T_PLAN_2:-0} ))
-          {
-            echo "| what | seconds |"
-            echo "| --- | --- |"
-            echo "| first plan (includes pgpushy's pgschema download) | $first |"
-            echo "| second plan (pgschema already cached) | $second |"
-            echo "| the difference, roughly the pgschema fetch | $(( first - second )) |"
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          du -sh ~/.cache/pgpushy || true
