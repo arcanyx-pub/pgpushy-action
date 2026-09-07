@@ -162,7 +162,7 @@ if [ "$(bytes_of "$body")" -gt "$MAX_BODY" ]; then
     note=$'\n\n... truncated: this plan is too large for a GitHub comment. See the workflow run log for all of it.'
     budget=$((MAX_BODY - ($(bytes_of "$body") - $(bytes_of "$log")) - $(bytes_of "$note")))
     [ "$budget" -gt 0 ] || budget=0
-    body=$(emit "$(printf '%s' "$log" | head -c "$budget")$note")
+    body=$(emit "$(head -c "$budget" <<<"$log")$note")
 fi
 
 # Last resort. The fixed parts are bounded — a capped destructive list, a
@@ -171,7 +171,7 @@ fi
 # inside the fence, so one is closed behind it.
 if [ "$(bytes_of "$body")" -gt "$MAX_BODY" ]; then
     tail_note=$(printf '\n%s\n\n... truncated: this comment did not fit. See the workflow run log.\n' "$fence")
-    body=$(printf '%s' "$body" | head -c $((MAX_BODY - $(bytes_of "$tail_note"))))$tail_note
+    body=$(head -c $((MAX_BODY - $(bytes_of "$tail_note"))) <<<"$body")$tail_note
 fi
 
 printf '%s\n' "$body"

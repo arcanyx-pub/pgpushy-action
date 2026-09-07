@@ -102,7 +102,7 @@ if [ "$COMMAND" = plan ]; then
         0 | 2)
             # Absolute from here on: the paths a consumer gives are relative
             # to working-directory, and the comment script runs elsewhere.
-            artifact=$(cd "$plan_dir" 2>/dev/null && pwd || true)
+            artifact=$(cd "$plan_dir" 2>/dev/null && pwd) || artifact=""
             ;;
     esac
 
