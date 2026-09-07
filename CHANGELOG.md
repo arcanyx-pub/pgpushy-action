@@ -7,6 +7,8 @@ major version is what consumers pin, since `@v1` is a tag that moves.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-07
+
 ### Added
 
 - The action itself: a composite action wrapping the pgpushy CLI, with
