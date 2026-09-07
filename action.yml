@@ -18,6 +18,10 @@ inputs:
   version:
     description: |
       Which pgpushy release to install, e.g. 0.3.2. A leading `v` is accepted.
+      This is the version of the pgpushy CLI and nothing else: the pgschema it
+      runs is pgpushy's own pin, and overriding that is a pgpushy.toml setting
+      rather than a flag or an input, because it can change what gets
+      reconciled (spec §10.1).
 
       There is no "latest". A plan and the apply of that plan should be run by
       the same program, and a schema tool that changed under a repository
