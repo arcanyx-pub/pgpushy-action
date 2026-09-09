@@ -7,13 +7,25 @@ actionlint := justfile_directory() / ".actionlint" / "actionlint"
 default:
     @just --list
 
-# Lint the workflows and every script, and run the fixture checks
+# Lint the workflows and every script, check the pin file, and run the fixture
+# checks
 lint: _actionlint
     {{ actionlint }} -color
     shellcheck scripts/*.sh .github/fixtures/*/check.sh
+    ./scripts/pin-check.sh
     bash .github/fixtures/comment/check.sh
     bash .github/fixtures/mask/check.sh
     bash .github/fixtures/exit/check.sh
+
+# Pin a different pgpushy release in pgpushy.pin, and print the diff to review
+#
+# The work is in scripts/bump-pgpushy.sh rather than inline here, because a
+# recipe body is the one piece of shell in this repository shellcheck does not
+# read, and rewriting the hashes an installed binary is verified against is not
+# where to have unchecked shell. It writes the file and stops: a human reviews
+# the four hashes beside the version, and CI proves them against the release.
+bump-pgpushy version:
+    ./scripts/bump-pgpushy.sh {{ version }}
 
 # Fetch the pinned actionlint into .actionlint/ if it is not already there
 #

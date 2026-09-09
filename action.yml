@@ -15,18 +15,6 @@ inputs:
       pgpushy itself. The other four are the CLI's own commands, with
       `generate-check` spelling `pgpushy generate --check`.
     required: true
-  version:
-    description: |
-      Which pgpushy release to install, e.g. 0.3.2. A leading `v` is accepted.
-      This is the version of the pgpushy CLI and nothing else: the pgschema it
-      runs is pgpushy's own pin, and overriding that is a pgpushy.toml setting
-      rather than a flag or an input, because it can change what gets
-      reconciled (spec §10.1).
-
-      There is no "latest". A plan and the apply of that plan should be run by
-      the same program, and a schema tool that changed under a repository
-      between two runs of one workflow would make that untrue.
-    required: true
   env:
     description: |
       Which `[env.<name>]` block in pgpushy.toml to reconcile against.
@@ -117,6 +105,18 @@ outputs:
   pgpushy-path:
     description: Absolute path of the installed binary. It is also on PATH.
     value: ${{ steps.install.outputs.pgpushy-path }}
+  pgpushy-version:
+    description: |
+      The pgpushy release this action installs, e.g. 0.3.2 — read from
+      pgpushy.pin, which also carries the SHA-256 of each of that release's
+      four binaries.
+
+      Which pgpushy runs is a property of the action version, not an input: the
+      end-to-end tests here exercise exactly one pgpushy, and an input would
+      let a workflow ask for a version nothing has tested this action against.
+      A workflow pins pgpushy by pinning the action, and reads this output to
+      record or assert what it got.
+    value: ${{ steps.install.outputs.pgpushy-version }}
 
 # A composite action: fetching one binary and running it is not worth a
 # container pull, and there is no reason to make a repository that uses a Rust
@@ -133,7 +133,6 @@ runs:
       run: '"$GITHUB_ACTION_PATH/scripts/inputs.sh"'
       env:
         COMMAND: ${{ inputs.command }}
-        VERSION: ${{ inputs.version }}
         PGPUSHY_ENV: ${{ inputs.env }}
         CONFIG: ${{ inputs.config }}
         PLAN_OUT: ${{ inputs.plan-out }}
@@ -150,12 +149,12 @@ runs:
       shell: bash
       run: '"$GITHUB_ACTION_PATH/scripts/mask.sh"'
 
+    # The version and the hash both come from pgpushy.pin, so this step needs
+    # no input: what it installs is a property of the action's own ref.
     - name: Install pgpushy
       id: install
       shell: bash
       run: '"$GITHUB_ACTION_PATH/scripts/install.sh"'
-      env:
-        VERSION: ${{ inputs.version }}
 
     # Fails only on the action's own errors, never on pgpushy's exit code.
     # That code is the contract (spec §9.1) and has to reach the caller as an

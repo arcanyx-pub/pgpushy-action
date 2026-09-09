@@ -9,13 +9,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # The pgpushy release every job installs. One place, because the e2e job
-  # also checks out the pgpushy repository at the matching tag for its
-  # example project, and a plan computed by one version against another
-  # version's example would be testing nothing in particular.
-  PGPUSHY_VERSION: "0.3.2"
-
 jobs:
   lint:
     name: actionlint & shellcheck
@@ -72,6 +65,38 @@ jobs:
       - run: bash .github/fixtures/mask/check.sh
       - run: bash .github/fixtures/exit/check.sh
 
+  # pgpushy.pin is this action's claim about the integrity of the binary it
+  # installs, so the claim is tested rather than asserted.
+  pin:
+    name: The pinned pgpushy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The pin file is well formed
+        run: ./scripts/pin-check.sh
+
+      # On every run, not only on the run that bumped the pin. This is about
+      # 60 MB and a few seconds, and it is the one check that would notice a
+      # release rewritten under its tag after it was reviewed here — which is
+      # the entire reason the hashes are shipped rather than fetched.
+      - name: The pinned hashes are what the release serves
+        run: |
+          set -euo pipefail
+          version=$(./scripts/pin.sh)
+          echo "pinned pgpushy: $version"
+          base="https://github.com/arcanyx-pub/pgpushy/releases/download/v$version"
+          mkdir assets
+          cd assets
+          for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+            curl --proto '=https' --proto-redir '=https' \
+              --fail --silent --show-error --location --retry 3 --retry-delay 2 \
+              -O "$base/pgpushy-$version-$platform"
+          done
+          # sha256sum reads the pin file directly, comments and all, which is
+          # why it is written in that format.
+          sha256sum -c ../pgpushy.pin
+
   install:
     name: Install on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
@@ -87,18 +112,26 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Read from the file rather than repeated in this workflow: an assertion
+      # that carried its own copy of the version would pass on a pin file that
+      # says something else.
+      - id: pin
+        run: echo "version=$(./scripts/pin.sh)" >> "$GITHUB_OUTPUT"
+
       - id: setup
         uses: ./
         with:
           command: setup
-          version: ${{ env.PGPUSHY_VERSION }}
 
-      - name: pgpushy is on PATH and is the version that was asked for
+      - name: pgpushy is on PATH and is the pinned version
         env:
           BINARY: ${{ steps.setup.outputs.pgpushy-path }}
+          PINNED: ${{ steps.pin.outputs.version }}
+          REPORTED: ${{ steps.setup.outputs.pgpushy-version }}
         run: |
           set -euo pipefail
-          test "$(pgpushy --version)" = "pgpushy $PGPUSHY_VERSION"
+          test "$(pgpushy --version)" = "pgpushy $PINNED"
+          test "$REPORTED" = "$PINNED"
           test -x "$BINARY"
           test "$(command -v pgpushy)" = "$BINARY"
           test "${{ steps.setup.outputs.exit-code }}" = "0"
@@ -118,7 +151,6 @@ jobs:
         uses: ./
         with:
           command: setup
-          version: ${{ env.PGPUSHY_VERSION }}
 
       - name: The second install reused the tool cache
         if: runner.os == 'Linux'
@@ -172,15 +204,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - id: pin
+        name: Read the pinned pgpushy version
+        run: echo "version=$(./scripts/pin.sh)" >> "$GITHUB_OUTPUT"
+
       # The example project is a complete pgpushy project — three managed
-      # schemas, seeds, generated sources — and pinning it to the same tag as
-      # the binary keeps this a test of the action rather than of whatever
-      # main happens to hold.
+      # schemas, seeds, generated sources — and checking it out at the tag the
+      # action pins keeps this a test of the action rather than of whatever
+      # main happens to hold. Both come from pgpushy.pin, so the binary and the
+      # project it plans cannot disagree.
       - name: Check out the pgpushy example project
         uses: actions/checkout@v7
         with:
           repository: arcanyx-pub/pgpushy
-          ref: v${{ env.PGPUSHY_VERSION }}
+          ref: v${{ steps.pin.outputs.version }}
           path: pgpushy-src
 
       # Read once, from the example's own configuration, and used both to
@@ -274,7 +311,6 @@ jobs:
         uses: ./
         with:
           command: validate
-          version: ${{ env.PGPUSHY_VERSION }}
           config: pgpushy.ci.toml
           working-directory: pgpushy-src/example
 
@@ -285,7 +321,6 @@ jobs:
         uses: ./
         with:
           command: generate-check
-          version: ${{ env.PGPUSHY_VERSION }}
           working-directory: .github/fixtures/generate
 
       - name: The offline commands succeeded and claimed nothing about destruction
@@ -316,7 +351,6 @@ jobs:
         uses: ./
         with:
           command: validate
-          version: ${{ env.PGPUSHY_VERSION }}
           config: pgpushy.ci.toml
           working-directory: pgpushy-src/example-invalid
 
@@ -325,7 +359,6 @@ jobs:
         uses: ./
         with:
           command: generate-check
-          version: ${{ env.PGPUSHY_VERSION }}
           working-directory: generate-drift
 
       - name: A rejected tree and a stale generated source both exit 1
@@ -344,7 +377,6 @@ jobs:
         uses: ./
         with:
           command: plan
-          version: ${{ env.PGPUSHY_VERSION }}
           env: ci
           config: pgpushy.ci.toml
           working-directory: pgpushy-src/example
@@ -399,7 +431,6 @@ jobs:
         uses: ./
         with:
           command: apply
-          version: ${{ env.PGPUSHY_VERSION }}
           env: ci
           config: pgpushy.ci.toml
           working-directory: pgpushy-src/example
@@ -415,7 +446,6 @@ jobs:
         uses: ./
         with:
           command: plan
-          version: ${{ env.PGPUSHY_VERSION }}
           env: ci
           config: pgpushy.ci.toml
           working-directory: pgpushy-src/example
@@ -453,7 +483,6 @@ jobs:
         uses: ./
         with:
           command: apply
-          version: ${{ env.PGPUSHY_VERSION }}
           env: other
           config: pgpushy.ci.toml
           working-directory: pgpushy-src/example
@@ -483,7 +512,6 @@ jobs:
         uses: ./
         with:
           command: plan
-          version: ${{ env.PGPUSHY_VERSION }}
           env: ci
           config: pgpushy.ci.toml
           working-directory: pgpushy-src/example
@@ -507,7 +535,6 @@ jobs:
         uses: ./
         with:
           command: plan
-          version: ${{ env.PGPUSHY_VERSION }}
           env: ci
           config: pgpushy.allow.toml
           working-directory: pgpushy-src/example
@@ -531,7 +558,6 @@ jobs:
         uses: ./
         with:
           command: plan
-          version: ${{ env.PGPUSHY_VERSION }}
           env: ci
           config: pgpushy.ci.toml
           working-directory: pgpushy-src/example
@@ -568,7 +594,6 @@ jobs:
         uses: ./
         with:
           command: plan
-          version: ${{ env.PGPUSHY_VERSION }}
           env: ci
           config: pgpushy.ci.toml
           working-directory: pgpushy-src/example-refused
@@ -589,7 +614,6 @@ jobs:
         uses: ./
         with:
           command: validate
-          version: ${{ env.PGPUSHY_VERSION }}
           config: pgpushy.ci.toml
           working-directory: pgpushy-src/example
           on-destructive: continue

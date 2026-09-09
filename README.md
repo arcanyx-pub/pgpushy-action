@@ -14,12 +14,15 @@ jobs so the approval applies to a reviewed object rather than to a recomputed
 one. This action is the glue.
 
 ```yaml
-- uses: arcanyx-pub/pgpushy-action@v1
+- uses: arcanyx-pub/pgpushy-action@v2
   with:
     command: plan
-    version: 0.3.2
     env: prod
 ```
+
+There is no `version` input: each release of this action pins one pgpushy and
+ships the SHA-256 of each of its binaries. See
+[Which pgpushy](#which-pgpushy).
 
 ## The deployment shape
 
@@ -47,10 +50,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: arcanyx-pub/pgpushy-action@v1
+      - uses: arcanyx-pub/pgpushy-action@v2
         with:
           command: plan
-          version: 0.3.2
           env: prod                  # the [env.prod] block in pgpushy.toml
           plan-out: ./plan
           # A fork's token cannot comment, so asking it to would fail the run.
@@ -86,10 +88,9 @@ jobs:
           name: pgpushy-plan
           path: ./plan
 
-      - uses: arcanyx-pub/pgpushy-action@v1
+      - uses: arcanyx-pub/pgpushy-action@v2
         with:
           command: apply
-          version: 0.3.2
           env: prod
           plan: ./plan               # apply exactly this
         env:
@@ -128,17 +129,15 @@ jobs:
       # The whole offline pipeline: discovery, parsing, the statement
       # allow-list, schema resolution, the validity checks and cross-schema
       # ordering.
-      - uses: arcanyx-pub/pgpushy-action@v1
+      - uses: arcanyx-pub/pgpushy-action@v2
         with:
           command: validate
-          version: 0.3.2
 
       # Vendored SQL from a dependency must match what the locked version
       # emits: a bump that changes the emitted SQL lands as a reviewed diff.
-      - uses: arcanyx-pub/pgpushy-action@v1
+      - uses: arcanyx-pub/pgpushy-action@v2
         with:
           command: generate-check
-          version: 0.3.2
 ```
 
 ## Inputs
@@ -146,7 +145,6 @@ jobs:
 | input | required | default | notes |
 | --- | --- | --- | --- |
 | `command` | yes | | `setup`, `validate`, `generate-check`, `plan` or `apply`. |
-| `version` | yes | | The pgpushy release to install, e.g. `0.3.2`. A leading `v` is accepted. |
 | `env` | for `plan`/`apply` | | The `[env.<name>]` block to reconcile against. Rejected for the other commands. |
 | `config` | no | | Passed as `--config`. Relative to `working-directory`. |
 | `working-directory` | no | `.` | Where pgpushy runs. |
@@ -159,9 +157,10 @@ jobs:
 `setup` installs the binary, puts it on `PATH`, and stops — for a workflow
 that wants to call pgpushy itself.
 
-There is **no `version: latest`**. A plan and the apply of that plan should be
-run by the same program, and a schema tool that changed under a repository
-between two runs of one workflow would make that untrue.
+There is **no `version` input**. Which pgpushy runs is a property of the action
+release, and a plan and the apply of that plan are run by the same program
+because both steps reference the same action ref — see
+[Which pgpushy](#which-pgpushy).
 
 ## Outputs
 
@@ -170,6 +169,7 @@ between two runs of one workflow would make that untrue.
 | `exit-code` | pgpushy's exit code: `0` success, `1` refused, `2` a valid plan that would destroy something. |
 | `destructive` | `true`/`false` for `plan`, empty otherwise. |
 | `pgpushy-path` | Absolute path of the installed binary. It is also on `PATH`. |
+| `pgpushy-version` | The pinned pgpushy release this action installed, e.g. `0.3.2`. |
 
 The step **fails when pgpushy does**, exit 2 included. A workflow that would
 rather route on a destructive plan than stop on it says so with
@@ -177,10 +177,9 @@ rather route on a destructive plan than stop on it says so with
 
 ```yaml
 - id: plan
-  uses: arcanyx-pub/pgpushy-action@v1
+  uses: arcanyx-pub/pgpushy-action@v2
   with:
     command: plan
-    version: 0.3.2
     env: prod
     on-destructive: continue   # exit 2 reports; exit 1 still fails
 
@@ -238,8 +237,8 @@ outputs:
 ```yaml
 - id: plan
   continue-on-error: true
-  uses: arcanyx-pub/pgpushy-action@v1
-  with: { command: plan, version: 0.3.2, env: prod }
+  uses: arcanyx-pub/pgpushy-action@v2
+  with: { command: plan, env: prod }
 
 - if: steps.plan.outputs.exit-code == '1'
   run: echo "pgpushy refused this plan; the tree is the problem, not the database"
@@ -382,45 +381,60 @@ through the secret masker before uploading it, and the comment goes out through
 the API unscrubbed, so a plan quoting a masked value reads `***` in the summary
 and reads the value in the comment.
 
+## Which pgpushy
+
+This action installs **pgpushy 0.3.2**. The version, and the SHA-256 of each of
+that release's four binaries, are in [`pgpushy.pin`](pgpushy.pin) — one file,
+read by the install script and by CI.
+
+There is no input for it, for two reasons:
+
+- **Nothing tests any other version.** The end-to-end job here runs the action
+  against a real database and a real plan artifact with exactly one pgpushy. An
+  input would let a workflow ask for a version this action has never been run
+  with, which is a compatibility claim nothing behind it checks — the same
+  argument pgpushy's spec §13 makes about the pgschema versions it names.
+- **The pin is what makes the download worth verifying.** Shipping the hashes
+  makes this action the source of truth for the binary's integrity, the way
+  pgpushy is for pgschema's (spec §8.5). A `SHA256SUMS` fetched from the same
+  origin as the binary catches a corrupted download and nothing more; a hash
+  table reviewed alongside the version bump catches a release that was
+  replaced. An input would mean either no shipped hash for whatever version was
+  asked for, or a table nobody reviewed.
+
+**A workflow pins pgpushy by pinning the action.** `@v2.0.0` is immutable, so
+it names one pgpushy for as long as that line stands; `@v2` moves, and picks up
+the pgpushy each release was tested with. A pgpushy release you need — a fix, a
+feature — is therefore an action release: `just bump-pgpushy <X.Y.Z>` is one
+command, its diff is four hashes and a version, and CI proves it end to end.
+Ask for one by opening an issue.
+
+Which pgschema pgpushy runs is pgpushy's own pin, one level further down.
+Overriding that is a `pgpushy.toml` setting rather than anything this action
+passes, because it can change what gets reconciled (spec §10.1).
+
+The `pgpushy-version` output reports what was installed, for a workflow that
+wants to print it or assert on it.
+
 ## Versioning
 
-Pin the action to the moving major tag and pgpushy to an exact version:
+Pin the action to the moving major tag:
 
 ```yaml
-uses: arcanyx-pub/pgpushy-action@v1
-with:
-  version: 0.3.2
+uses: arcanyx-pub/pgpushy-action@v2
 ```
 
-`v1` moves as this action changes and will not break its inputs; `version`
-pins the tool, so a pgpushy release never changes what a repository's schema
-runs do until someone edits that line.
+`v2` moves as this action changes and will not break its inputs. Because each
+release names one pgpushy, what a repository's schema runs execute changes when
+that tag moves — pin `@v2.0.0` instead to hold both the action and its pgpushy
+exactly, which is also what an audit reads.
 
-### One version, many workflows
-
-`version` is required on every step, which in a workflow with a plan job and an
-apply job means writing it twice — and a bump that updates one of them plans
-with one program and applies with another. Put it in a workflow-level `env:`
-and reference it:
-
-```yaml
-env:
-  PGPUSHY_VERSION: "0.3.2"
-
-jobs:
-  plan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: arcanyx-pub/pgpushy-action@v1
-        with:
-          command: plan
-          version: ${{ env.PGPUSHY_VERSION }}
-```
-
-Across several workflows, a [repository variable](https://docs.github.com/en/actions/learn-github-actions/variables)
-does the same job for all of them: `version: ${{ vars.PGPUSHY_VERSION }}`, and
-a bump is one edit in the repository's settings. This action's own CI takes the
-first form — one `env:` at the top of `ci.yml`, read by every job.
+Within `v2`, an input is never removed or given a different meaning and an
+output never changes what it reports; anything that would break a workflow
+written against `v2` is a `v3`. `v2` is a new major rather than a minor because
+GitHub only *warns* about an input an action does not declare: a `v1` that
+dropped the `version` input would have silently ignored the version a consumer
+had pinned. `v1` stays at 1.1.1, where `version` is required and works.
 
 ## Platforms
 
@@ -429,10 +443,14 @@ for, which are the platforms pgschema publishes binaries for. There is no
 Windows binary, and the action says so rather than failing on a 404.
 
 The binary is downloaded from the pgpushy release, verified against the
-release's `SHA256SUMS`, and cached under `RUNNER_TOOL_CACHE` by version and
-platform. A cache hit is re-verified rather than trusted for being present:
-that is what pgpushy itself does for pgschema, and a downloaded-and-executed
-binary in CI is a supply-chain step whether or not anyone calls it one.
+SHA-256 in [`pgpushy.pin`](pgpushy.pin), and cached under `RUNNER_TOOL_CACHE`
+by version and platform. A cache hit is re-verified rather than trusted for
+being present: that is what pgpushy itself does for pgschema, and a
+downloaded-and-executed binary in CI is a supply-chain step whether or not
+anyone calls it one. The hashes ship with the action and are never read from
+the network, and CI downloads all four assets and checks them against the pin
+on every run — an integrity claim that is only worth making if something tests
+it.
 
 pgschema is not cached by the action. pgpushy downloads and verifies it on the
 first run that needs a target, into `~/.cache/pgpushy`, and measured on hosted
