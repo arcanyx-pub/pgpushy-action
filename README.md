@@ -170,7 +170,7 @@ because both steps reference the same action ref — see
 | `exit-code` | pgpushy's exit code: `0` success, `1` refused, `2` a valid plan that would destroy something. |
 | `destructive` | `true`/`false` for `plan`, empty otherwise. |
 | `pgpushy-path` | Absolute path of the installed binary. It is also on `PATH`. |
-| `pgpushy-version` | The pinned pgpushy release this action installed, e.g. `0.3.2`. |
+| `pgpushy-version` | The pinned pgpushy release this action installed — see [Which pgpushy](#which-pgpushy). |
 
 The step **fails when pgpushy does**, exit 2 included. A workflow that would
 rather route on a destructive plan than stop on it says so with
@@ -384,7 +384,7 @@ and reads the value in the comment.
 
 ## Which pgpushy
 
-This action installs **pgpushy 0.3.2**. The version, and the SHA-256 of each of
+This action installs **pgpushy 0.3.3**. The version, and the SHA-256 of each of
 that release's four binaries, are in [`pgpushy.pin`](pgpushy.pin) — one file,
 read by the install script and by CI.
 
