@@ -146,7 +146,11 @@ jobs:
       postgres:
         image: postgres:17-alpine
         env:
-          POSTGRES_PASSWORD: postgres
+          # Eight characters or more, because that is the floor under which the
+          # action declines to mask a password: the runner redacts every
+          # occurrence of a masked string, and a short one would black out
+          # unrelated text in this job's log.
+          POSTGRES_PASSWORD: postgres-ci-pw
         ports:
           - 5432:5432
         options: >-
@@ -159,7 +163,7 @@ jobs:
       # variables must not override a named environment's target (spec §10.2),
       # and the password is the one exception, because a secret does not
       # belong in a version-controlled file.
-      PGPASSWORD: postgres
+      PGPASSWORD: postgres-ci-pw
       PROJECT: pgpushy-src/example
     steps:
       - uses: actions/checkout@v7
@@ -244,6 +248,21 @@ jobs:
               psql -h localhost -U postgres -d "$db" -c "CREATE SCHEMA \"$schema\""
             done
           done
+
+      # The mask step's own script, run directly. A composite step's stdout is
+      # not readable from the job that called it and the run log is not
+      # readable from inside the run, so what can be checked here is that the
+      # script the action runs masks the password this job actually uses.
+      - name: The password is registered with the log masker
+        run: |
+          set -euo pipefail
+          out=$(./scripts/mask.sh)
+          grep -qF 'pgpushy-action: masked PGPASSWORD' <<< "$out"
+          # Exactly one line carries the value: the ::add-mask:: command, which
+          # is how a value is handed to the runner to redact. The confirmation
+          # line names the variable and never its contents.
+          test "$(grep -cF "$PGPASSWORD" <<< "$out")" = "1"
+          grep -qF "::add-mask::$PGPASSWORD" <<< "$out"
 
       # 1. Offline checks.
 
@@ -344,6 +363,28 @@ jobs:
           test -f "$PROJECT/plan/summary.json"
           test "$(jq -r '.total.destructive' "$PROJECT/plan/summary.json")" = "0"
           test "$(jq -r '.total.steps' "$PROJECT/plan/summary.json")" -gt 0
+
+      # The plan step above wrote its summary already; a step's
+      # $GITHUB_STEP_SUMMARY is not readable from a later one, so the same
+      # script is run again over the same artifact and log against a file this
+      # job can read.
+      - name: The plan reaches the step summary, without the comment marker
+        env:
+          GITHUB_STEP_SUMMARY: ${{ runner.temp }}/summary.md
+          GITHUB_ACTION_PATH: ${{ github.workspace }}
+          PGPUSHY_ENV: ci
+          EXIT_CODE: "0"
+          PLAN_DIR: ${{ github.workspace }}/pgpushy-src/example/plan
+        run: |
+          set -euo pipefail
+          LOG_FILE="$RUNNER_TEMP/pgpushy-plan.log" ./scripts/summary.sh
+          test -s "$GITHUB_STEP_SUMMARY"
+          grep -q '^### ' "$GITHUB_STEP_SUMMARY"
+          grep -q 'pgpushy plan' "$GITHUB_STEP_SUMMARY"
+          if grep -q 'pgpushy-action plan env=' "$GITHUB_STEP_SUMMARY"; then
+            echo "the step summary carries the comment's hidden marker" >&2
+            exit 1
+          fi
 
       # 3. Apply exactly that artifact.
 
@@ -472,3 +513,74 @@ jobs:
           test "${{ steps.destructive-allowed.outputs.exit-code }}" = "0"
           test "${{ steps.destructive-allowed.outputs.destructive }}" = "true"
           test "$(jq -r '.total.destructive' "$PROJECT/plan-allowed/summary.json")" = "2"
+
+      # 7. Routing on a destructive plan instead of stopping on it. The same
+      # tree and the same environment as step 6 — pgpushy still exits 2 and the
+      # artifact still lists both drops — with no continue-on-error on the
+      # step, which is the point: the outcome has to distinguish this from a
+      # refusal all by itself.
+
+      - id: destructive-continue
+        uses: ./
+        with:
+          command: plan
+          version: ${{ env.PGPUSHY_VERSION }}
+          env: ci
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+          plan-out: ./plan-continue
+          on-destructive: continue
+
+      - name: on-destructive continue reports exit 2 without failing the step
+        run: |
+          set -euo pipefail
+          test "${{ steps.destructive-continue.outcome }}" = "success"
+          test "${{ steps.destructive-continue.outputs.exit-code }}" = "2"
+          test "${{ steps.destructive-continue.outputs.destructive }}" = "true"
+          # Nothing was allowed: the plan is the same blocked plan, and the
+          # input changed only how the step reported it.
+          test "$(jq -r '.total.destructive' "$PROJECT/plan-continue/summary.json")" = "2"
+
+      # And the half that must not be swallowed. A refused plan is exit 1, and
+      # `on-destructive: continue` has nothing to say about it — which is the
+      # distinction continue-on-error cannot make, and why this step needs
+      # continue-on-error to let the job read the outputs at all.
+      - name: Break a copy of the project again
+        run: |
+          set -euo pipefail
+          cp -r "$PROJECT" pgpushy-src/example-refused
+          echo 'CREATE VIEW busted AS SELECT 1 AS x;' \
+            > pgpushy-src/example-refused/db/schema/app/busted.sql
+
+      - id: refused-continue
+        continue-on-error: true
+        uses: ./
+        with:
+          command: plan
+          version: ${{ env.PGPUSHY_VERSION }}
+          env: ci
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example-refused
+          on-destructive: continue
+
+      - name: A refused plan fails the step whatever on-destructive says
+        run: |
+          set -euo pipefail
+          test "${{ steps.refused-continue.outcome }}" = "failure"
+          test "${{ steps.refused-continue.outputs.exit-code }}" = "1"
+          test "${{ steps.refused-continue.outputs.destructive }}" = "false"
+          rm -rf pgpushy-src/example-refused
+
+      # `on-destructive` belongs to `plan` alone, and the action says so before
+      # anything is downloaded.
+      - id: on-destructive-misused
+        continue-on-error: true
+        uses: ./
+        with:
+          command: validate
+          version: ${{ env.PGPUSHY_VERSION }}
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+          on-destructive: continue
+
+      - run: test "${{ steps.on-destructive-misused.outcome }}" = "failure"

@@ -7,6 +7,23 @@ major version is what consumers pin, since `@v1` is a tag that moves.
 
 ## [Unreleased]
 
+### Added
+
+- `on-destructive: continue`: a destructive plan (exit 2) reports rather than
+  fails the step, with `exit-code` 2 and `destructive` true, so a workflow can
+  route on the finding without `continue-on-error` — which swallows a refused
+  plan and a destructive one alike, though they route to different people. Exit
+  1 fails the step either way. This is not `allow_destructive`: pgpushy still
+  exits 2, the artifact still lists every destructive step, and nothing is
+  applied.
+- `PGPASSWORD` and `PGPUSHY_PLAN_PASSWORD` are registered with the runner's log
+  masker for the rest of the job, which covers a password minted during the run
+  that no secret store has seen. A value under eight characters is left alone,
+  because the runner redacts every occurrence of a masked string.
+- Every `plan` writes its body — the pull-request comment's, without the hidden
+  marker — to the run's step summary, so a plan on a push or a schedule is
+  readable without opening the log.
+
 ## [1.0.0] - 2026-09-07
 
 ### Added
