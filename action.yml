@@ -74,6 +74,22 @@ inputs:
       any event but `pull_request`, and says so.
     required: false
     default: "false"
+  on-destructive:
+    description: |
+      For `plan`: what a destructive plan does to this step. `fail` (the
+      default) fails it; `continue` succeeds, with `exit-code` still 2 and
+      `destructive` still true, so a workflow can route on the finding without
+      `continue-on-error`.
+
+      Exit 1 fails the step either way. That is the point: `continue-on-error`
+      swallows a refused plan and a destructive one alike, and spec §9.1 makes
+      them route to different people.
+
+      This is not `allow_destructive`. pgpushy still exits 2, the artifact
+      still records every destructive step, and nothing is applied; only the
+      step's outcome changes.
+    required: false
+    default: fail
   token:
     description: Token used to post the plan comment, and only for that.
     required: false
@@ -119,7 +135,16 @@ runs:
         PLAN_OUT: ${{ inputs.plan-out }}
         PLAN: ${{ inputs.plan }}
         COMMENT: ${{ inputs.comment }}
+        ON_DESTRUCTIVE: ${{ inputs.on-destructive }}
         WORKING_DIRECTORY: ${{ inputs.working-directory }}
+
+    # Before the first thing that could log one. PGPASSWORD and
+    # PGPUSHY_PLAN_PASSWORD are read from the job's environment, not from an
+    # input, and a password minted during the run has never been through a
+    # secret store that could mask it.
+    - name: Mask the passwords
+      shell: bash
+      run: '"$GITHUB_ACTION_PATH/scripts/mask.sh"'
 
     - name: Install pgpushy
       id: install
@@ -143,6 +168,20 @@ runs:
         PLAN: ${{ inputs.plan }}
         WORKING_DIRECTORY: ${{ inputs.working-directory }}
 
+    # Every plan, with no input to turn it off, and before the comment so that
+    # a token that cannot post still leaves the plan somewhere readable. A run
+    # on a push or a schedule has no pull request to comment on, and its plan
+    # would otherwise be in the log only.
+    - name: Write the plan to the step summary
+      if: inputs.command == 'plan'
+      shell: bash
+      run: '"$GITHUB_ACTION_PATH/scripts/summary.sh"'
+      env:
+        PGPUSHY_ENV: ${{ inputs.env }}
+        EXIT_CODE: ${{ steps.pgpushy.outputs.exit-code }}
+        LOG_FILE: ${{ steps.pgpushy.outputs.log-file }}
+        PLAN_DIR: ${{ steps.pgpushy.outputs.plan-dir }}
+
     # Runs whatever pgpushy exited with, because a destructive or refused plan
     # is the plan most worth putting in front of a reviewer.
     - name: Comment the plan on the pull request
@@ -159,10 +198,13 @@ runs:
         GH_TOKEN: ${{ inputs.token }}
 
     # The step fails when pgpushy did, exit 2 included: a destructive plan
-    # stops a pipeline by default, and a workflow that would rather route on
-    # it than stop sets `continue-on-error: true` and reads `destructive`.
+    # stops a pipeline by default. `on-destructive: continue` is how a workflow
+    # that would rather route on that finding than stop on it says so, and it
+    # leaves exit 1 fatal.
     - name: Exit with pgpushy's exit code
       shell: bash
-      run: exit "$EXIT_CODE"
+      run: '"$GITHUB_ACTION_PATH/scripts/exit.sh"'
       env:
         EXIT_CODE: ${{ steps.pgpushy.outputs.exit-code }}
+        COMMAND: ${{ inputs.command }}
+        ON_DESTRUCTIVE: ${{ inputs.on-destructive }}

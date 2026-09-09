@@ -26,7 +26,7 @@ forbid() {
 
 : "${COMMAND:?}" "${VERSION:?}"
 : "${PGPUSHY_ENV:=}" "${CONFIG:=}" "${PLAN_OUT:=}" "${PLAN:=}" "${COMMENT:=}"
-: "${WORKING_DIRECTORY:=.}"
+: "${ON_DESTRUCTIVE:=}" "${WORKING_DIRECTORY:=.}"
 
 case "$COMMAND" in
     setup | validate | generate-check | plan | apply) ;;
@@ -70,6 +70,18 @@ fi
 case "$COMMENT" in
     true | false | "") ;;
     *) fail "'comment' must be true or false, not '$COMMENT'" ;;
+esac
+
+# Only exit 2 is routable, and only `plan` produces one (spec §9.1). The
+# rejection names `continue` rather than any value, for the same reason
+# `comment` above rejects only `true`: the input carries a default, so every
+# command sees the default and asking for the default is asking for nothing.
+if [ "$COMMAND" != plan ] && [ "$ON_DESTRUCTIVE" = continue ]; then
+    fail "'on-destructive' applies to the 'plan' command only, not '$COMMAND': exit 2 is a plan's destructive finding and no other command reports one"
+fi
+case "$ON_DESTRUCTIVE" in
+    fail | continue | "") ;;
+    *) fail "'on-destructive' must be fail or continue, not '$ON_DESTRUCTIVE'" ;;
 esac
 
 # `setup` runs no pgpushy command, so there is no project for a config to

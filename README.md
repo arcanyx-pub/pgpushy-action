@@ -151,6 +151,7 @@ jobs:
 | `plan-out` | `plan` only | | Where the plan artifact is written. Relative to `working-directory`. |
 | `plan` | `apply` only | | A plan artifact to apply exactly. Relative to `working-directory`. |
 | `comment` | `plan` only | `false` | Upsert the plan as a pull-request comment. |
+| `on-destructive` | `plan` only | `fail` | `fail` or `continue`: whether a destructive plan (exit 2) fails the step. Exit 1 fails it either way. |
 | `token` | no | `${{ github.token }}` | Used only to post that comment. |
 
 `setup` installs the binary, puts it on `PATH`, and stops — for a workflow
@@ -169,7 +170,30 @@ between two runs of one workflow would make that untrue.
 | `pgpushy-path` | Absolute path of the installed binary. It is also on `PATH`. |
 
 The step **fails when pgpushy does**, exit 2 included. A workflow that would
-rather route on a destructive plan than stop on it takes the outputs instead:
+rather route on a destructive plan than stop on it says so with
+`on-destructive: continue`:
+
+```yaml
+- id: plan
+  uses: arcanyx-pub/pgpushy-action@v1
+  with:
+    command: plan
+    version: 0.3.2
+    env: prod
+    on-destructive: continue   # exit 2 reports; exit 1 still fails
+
+- if: steps.plan.outputs.destructive == 'true'
+  run: gh pr edit "$PR" --add-label destructive
+```
+
+`on-destructive: continue` is **not `allow_destructive`**: pgpushy still exits
+2, the artifact still lists every destructive step, and nothing is applied —
+the input changes only how the step reports the finding.
+
+Use `continue-on-error: true` for the other half: reading `exit-code` after a
+run that **failed**, a refusal included. Without it a failed step skips every
+later step by its implicit `success()`, and there is nothing left to read the
+outputs:
 
 ```yaml
 - id: plan
@@ -177,13 +201,13 @@ rather route on a destructive plan than stop on it takes the outputs instead:
   uses: arcanyx-pub/pgpushy-action@v1
   with: { command: plan, version: 0.3.2, env: prod }
 
-- if: steps.plan.outputs.destructive == 'true'
-  run: gh pr edit "$PR" --add-label destructive
+- if: steps.plan.outputs.exit-code == '1'
+  run: echo "pgpushy refused this plan; the tree is the problem, not the database"
 ```
 
-`continue-on-error: true` is what makes the outputs reachable: without it, a
-failed step means every later step is skipped by its implicit `success()`, and
-there is nothing left to read them.
+What `continue-on-error` cannot do is tell those two apart — it swallows a
+refused plan and a destructive one alike, and spec §9.1 makes them route to
+different people. That is the whole reason `on-destructive` exists.
 
 ## Credentials
 
@@ -203,6 +227,17 @@ and there is no input to turn that off: standard input is never a terminal in
 Actions, so pgpushy would refuse the run outright, and the approval this shape
 relies on is the required reviewers on the job's `environment:` — which have
 already answered by the time the job is allowed to start.
+
+### Secrets
+
+The action registers `PGPASSWORD` and `PGPUSHY_PLAN_PASSWORD` with the runner's
+log masker for the rest of the job. A value from `secrets.*` is masked already;
+the one this covers is a password **minted during the run** — an OIDC exchange,
+an RDS auth token, anything a step computed rather than stored — which no
+secret store ever saw and therefore no secret store masks. Steps that ran
+before this action are not covered, and a value under eight characters is left
+alone: the runner redacts every occurrence of a masked string anywhere in the
+log, so masking a short one would black out unrelated text.
 
 ## Never use this with `pull_request_target`
 
@@ -247,6 +282,10 @@ one: a destructive plan fails the plan job, and the gated apply job never runs.
 to proceed — an environment with `allow_destructive = true` exits 0 and still
 reports `true`.
 
+`on-destructive: continue` is a different thing again, and does not belong in
+this section's argument: it permits nothing, changing only whether the *step*
+fails on a finding pgpushy has already made and blocked.
+
 ## Permissions
 
 `comment: true` needs `pull-requests: write` on the job. If the token cannot
@@ -272,6 +311,18 @@ nowhere to post and does nothing else. Only comments this action wrote are
 edited — the marker is visible in any comment's source, so a plain match on it
 would let a pull request author capture the plan under their own name.
 
+## The step summary
+
+Every `plan` also writes that body — the same headline, the same destructive
+list, the same plan output, without the hidden marker — to the run's
+[job summary](https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions#adding-a-job-summary).
+There is no input for it. A run on a push or a schedule has no pull request to
+comment on, and its plan would otherwise be readable only by opening the job
+and scrolling the log; on the summary page it is the first thing under the run.
+The comment's truncation applies unchanged: a step summary may be 1 MiB where a
+comment may be 64 KB, but one budget means the two are the same plan, and a
+plan that overruns 60 KB is one to read in the artifact rather than in either.
+
 ## Versioning
 
 Pin the action to the moving major tag and pgpushy to an exact version:
@@ -285,6 +336,32 @@ with:
 `v1` moves as this action changes and will not break its inputs; `version`
 pins the tool, so a pgpushy release never changes what a repository's schema
 runs do until someone edits that line.
+
+### One version, many workflows
+
+`version` is required on every step, which in a workflow with a plan job and an
+apply job means writing it twice — and a bump that updates one of them plans
+with one program and applies with another. Put it in a workflow-level `env:`
+and reference it:
+
+```yaml
+env:
+  PGPUSHY_VERSION: "0.3.2"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: arcanyx-pub/pgpushy-action@v1
+        with:
+          command: plan
+          version: ${{ env.PGPUSHY_VERSION }}
+```
+
+Across several workflows, a [repository variable](https://docs.github.com/en/actions/learn-github-actions/variables)
+does the same job for all of them: `version: ${{ vars.PGPUSHY_VERSION }}`, and
+a bump is one edit in the repository's settings. This action's own CI takes the
+first form — one `env:` at the top of `ci.yml`, read by every job.
 
 ## Platforms
 

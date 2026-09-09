@@ -19,6 +19,13 @@ set -euo pipefail
 : "${PGPUSHY_ENV:?}" "${EXIT_CODE:?}"
 : "${LOG_FILE:=}" "${PLAN_DIR:=}"
 
+# The step summary wants this body without the hidden marker, which is there to
+# find a comment again and edit it — a summary is written once and never looked
+# up. The marker is dropped at the end rather than never added, so that both
+# spellings are the same body under the same budget: the marker-less one is the
+# comment minus its first line, byte for byte.
+: "${WITHOUT_MARKER:=}"
+
 # GitHub rejects an issue comment body over 65,536 characters. This budget is
 # in bytes, which is the conservative reading of that limit and the one `wc -c`
 # can enforce, and it stops well short so that the headline and the destructive
@@ -172,6 +179,12 @@ fi
 if [ "$(bytes_of "$body")" -gt "$MAX_BODY" ]; then
     tail_note=$(printf '\n%s\n\n... truncated: this comment did not fit. See the workflow run log.\n' "$fence")
     body=$(head -c $((MAX_BODY - $(bytes_of "$tail_note"))) <<<"$body")$tail_note
+fi
+
+if [ "$WITHOUT_MARKER" = 1 ]; then
+    # Everything up to and including the first newline, which is the marker
+    # line and nothing else.
+    body=${body#*$'\n'}
 fi
 
 printf '%s\n' "$body"

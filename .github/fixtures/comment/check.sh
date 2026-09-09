@@ -49,6 +49,24 @@ fences_balanced() {
     ' <<<"$1"
 }
 
+# The step summary is this same builder with WITHOUT_MARKER=1. It has to be the
+# comment minus its marker and nothing else — one body, one truncation budget,
+# no second spelling of the plan that could drift from the first.
+assert_markerless() {
+    local marked="$1" markerless="$2"
+
+    case "$markerless" in
+        *"<!-- pgpushy-action plan env="*) check "the marker-less body carries no marker" no ;;
+        *) check "the marker-less body carries no marker" yes ;;
+    esac
+
+    if [ "$markerless" = "$(tail -n +2 <<<"$marked")" ]; then
+        check "the marker-less body is the comment minus its first line" yes
+    else
+        check "the marker-less body is the comment minus its first line" no
+    fi
+}
+
 assert_body() {
     local name="$1" body="$2" expect_file="$3"
     echo "$name"
@@ -86,18 +104,22 @@ export GITHUB_SERVER_URL=https://github.com
 export GITHUB_REPOSITORY=arcanyx-pub/pgpushy-action
 export GITHUB_RUN_ID=1
 
+# One place that spells out the builder's inputs, so the comment body and the
+# step summary of a case differ in exactly the flag under test.
+build() {
+    local without_marker="$1" code="$2" log="$3" plan="$4"
+    PGPUSHY_ENV=prod EXIT_CODE="$code" LOG_FILE="$log" PLAN_DIR="$plan" \
+        WITHOUT_MARKER="$without_marker" "$builder"
+}
+
 for case_dir in "$here"/cases/*/; do
     name=$(basename "$case_dir")
     plan_dir=""
     [ ! -d "$case_dir/plan" ] || plan_dir="$case_dir/plan"
-    body=$(
-        PGPUSHY_ENV=prod \
-            EXIT_CODE="$(cat "$case_dir/exit-code")" \
-            LOG_FILE="$case_dir/plan.log" \
-            PLAN_DIR="$plan_dir" \
-            "$builder"
-    )
+    code=$(cat "$case_dir/exit-code")
+    body=$(build "" "$code" "$case_dir/plan.log" "$plan_dir")
     assert_body "$name" "$body" "$case_dir/expect"
+    assert_markerless "$body" "$(build 1 "$code" "$case_dir/plan.log" "$plan_dir")"
 done
 
 # Built rather than committed: the point is a body the fixed parts alone would
@@ -129,11 +151,11 @@ jq -n '{
 printf '%s\n' \
     '### ⚠️ Destructive changes for `prod` (blocked: `allow_destructive` is not set for this environment)' \
     '... and 3950 more; see the plan artifact' >"$oversized/expect"
-body=$(
-    PGPUSHY_ENV=prod EXIT_CODE=2 \
-        LOG_FILE="$oversized/plan.log" PLAN_DIR="$oversized/plan" "$builder"
-)
+body=$(build "" 2 "$oversized/plan.log" "$oversized/plan")
 assert_body "oversized (generated)" "$body" "$oversized/expect"
+# Truncation included: the marker is dropped after the budget is spent, so a
+# body that had to be cut is cut in the same place either way.
+assert_markerless "$body" "$(build 1 2 "$oversized/plan.log" "$oversized/plan")"
 
 # And the case the last resort exists for: 50 destructive steps whose names are
 # each two kilobytes, so the parts that are never truncated are themselves over
@@ -154,11 +176,9 @@ jq -n '{
     total: {steps: 60, destructive: 60}
 }' >"$huge/plan/summary.json"
 echo '... truncated: this comment did not fit. See the workflow run log.' >"$huge/expect"
-body=$(
-    PGPUSHY_ENV=prod EXIT_CODE=2 \
-        LOG_FILE="$huge/plan.log" PLAN_DIR="$huge/plan" "$builder"
-)
+body=$(build "" 2 "$huge/plan.log" "$huge/plan")
 assert_body "unbounded names (generated)" "$body" "$huge/expect"
+assert_markerless "$body" "$(build 1 2 "$huge/plan.log" "$huge/plan")"
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures check(s) failed" >&2
