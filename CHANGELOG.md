@@ -7,6 +7,8 @@ major version is what consumers pin, since `@v1` is a tag that moves.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-09
+
 ### Added
 
 - `on-destructive: continue`: a destructive plan (exit 2) reports rather than
