@@ -119,9 +119,9 @@ outputs:
     value: ${{ steps.install.outputs.pgpushy-path }}
   pgpushy-version:
     description: |
-      The pinned pgpushy release this action installed, e.g. 0.3.2, read from
-      pgpushy.pin. A workflow that wants which pgpushy ran in its log, or in an
-      assertion, reads it here.
+      The pinned pgpushy release this action installed, read from pgpushy.pin.
+      A workflow that wants which pgpushy ran in its log, or in an assertion,
+      reads it here.
     value: ${{ steps.install.outputs.pgpushy-version }}
 
 # A composite action: fetching one binary and running it is not worth a
