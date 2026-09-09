@@ -4,6 +4,12 @@ on:
   pull_request:
   push:
     branches: [main]
+  # For the `pin` job. "The pinned hashes are what the release serves" is a
+  # claim about files on a server, and a repository that has gone quiet would
+  # otherwise stop checking it — which is when a release rewritten under its
+  # tag would go unnoticed longest.
+  schedule:
+    - cron: "17 6 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -70,6 +76,9 @@ jobs:
   pin:
     name: The pinned pgpushy
     runs-on: ubuntu-latest
+    # Four binaries over the public internet; a job that hangs on one of them
+    # should say so rather than occupy a runner for six hours.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -94,8 +103,9 @@ jobs:
               -O "$base/pgpushy-$version-$platform"
           done
           # sha256sum reads the pin file directly, comments and all, which is
-          # why it is written in that format.
-          sha256sum -c ../pgpushy.pin
+          # why it is written in that format. --strict, so a row it cannot
+          # parse fails here too rather than only in pin-check.sh.
+          sha256sum --strict -c ../pgpushy.pin
 
   install:
     name: Install on ${{ matrix.runner }}
@@ -114,9 +124,14 @@ jobs:
 
       # Read from the file rather than repeated in this workflow: an assertion
       # that carried its own copy of the version would pass on a pin file that
-      # says something else.
+      # says something else. Assigned before it is written, because a command
+      # substitution inside a redirection would hand `echo` an empty string and
+      # succeed on a pin file that could not be read.
       - id: pin
-        run: echo "version=$(./scripts/pin.sh)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          version=$(./scripts/pin.sh)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - id: setup
         uses: ./
@@ -204,9 +219,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Assigned before it is written: a command substitution inside the
+      # redirection would swallow a pin.sh failure and set an empty version.
       - id: pin
         name: Read the pinned pgpushy version
-        run: echo "version=$(./scripts/pin.sh)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          version=$(./scripts/pin.sh)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       # The example project is a complete pgpushy project — three managed
       # schemas, seeds, generated sources — and checking it out at the tag the
@@ -607,6 +627,34 @@ jobs:
           test "${{ steps.refused-continue.outputs.destructive }}" = "false"
           rm -rf pgpushy-src/example-refused
 
+      # A workflow moving from v1 keeps its `version:` line until someone
+      # deletes it, and the runner would only warn. The action declares the
+      # input so that it can refuse it instead, and this is that refusal.
+      - id: version-set
+        continue-on-error: true
+        uses: ./
+        with:
+          command: validate
+          version: "0.3.2"
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+
+      - name: A leftover version input is refused by name
+        env:
+          COMMAND: validate
+          VERSION: "0.3.2"
+        run: |
+          set -euo pipefail
+          test "${{ steps.version-set.outcome }}" = "failure"
+          # The action's own error goes to the runner log, which a later step
+          # cannot read, so the message is checked by running the script the
+          # action ran with the inputs it was given.
+          if out=$(./scripts/inputs.sh 2>&1); then
+            echo "inputs.sh accepted a version input: $out" >&2
+            exit 1
+          fi
+          grep -qF "::error::pgpushy-action: 'version' is not an input of this action" <<< "$out"
+
       # `on-destructive` belongs to `plan` alone, and the action says so before
       # anything is downloaded.
       - id: on-destructive-misused
@@ -621,7 +669,6 @@ jobs:
       - name: on-destructive is refused by name, not just refused
         env:
           COMMAND: validate
-          VERSION: ${{ env.PGPUSHY_VERSION }}
           ON_DESTRUCTIVE: continue
         run: |
           set -euo pipefail

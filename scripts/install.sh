@@ -41,9 +41,10 @@ platform="$os-$arch"
 
 # One read, of one file: the version this action installs and the hash it must
 # have are the same pin, so a runner cannot end up verifying one release
-# against another's hash.
-pinned=$("$(dirname "${BASH_SOURCE[0]}")/pin.sh" "$platform") ||
-    fail "could not read the pinned pgpushy version for $platform"
+# against another's hash. pin.sh's own message is what gets annotated — it
+# names the row it could not read, which a "could not read the pin" of this
+# script's own would throw away.
+pinned=$("$(dirname "${BASH_SOURCE[0]}")/pin.sh" "$platform" 2>&1) || fail "$pinned"
 read -r version expected <<<"$pinned"
 
 asset="pgpushy-$version-$platform"
@@ -61,12 +62,6 @@ dir="$RUNNER_TOOL_CACHE/pgpushy/$version/$platform"
 binary="$dir/pgpushy"
 mkdir -p "$dir"
 
-# Under the tool cache rather than in /tmp, so that the move into place at the
-# end is a rename within one filesystem and therefore atomic. A partially
-# copied binary that a later job found and ran is the failure this avoids.
-work=$(mktemp -d "$RUNNER_TOOL_CACHE/pgpushy/.tmp.XXXXXX")
-trap 'rm -rf "$work"' EXIT
-
 started=$SECONDS
 if [ -f "$binary" ] && [ "$(sha256_of "$binary")" = "$expected" ]; then
     echo "pgpushy $version ($platform) is already in the tool cache and still matches the pinned hash"
@@ -75,6 +70,15 @@ else
     # path covers both "not downloaded yet" and "downloaded, but not what the
     # pin says it is".
     [ ! -f "$binary" ] || echo "::warning::cached $binary does not match the hash pinned in pgpushy.pin; re-downloading"
+
+    # Under the tool cache rather than in /tmp, so that the move into place at
+    # the end is a rename within one filesystem and therefore atomic. A
+    # partially copied binary that a later job found and ran is the failure
+    # this avoids. Only this branch downloads anything, so only this branch
+    # needs the directory.
+    work=$(mktemp -d "$RUNNER_TOOL_CACHE/pgpushy/.tmp.XXXXXX")
+    trap 'rm -rf "$work"' EXIT
+
     echo "Downloading $base/$asset"
     curl --proto '=https' --proto-redir '=https' \
         --fail --silent --show-error --location --retry 3 --retry-delay 2 \
@@ -108,7 +112,8 @@ echo "$dir" >>"$GITHUB_PATH"
 # served from the wrong place, or a tool cache shared with something else,
 # shows up here rather than three steps later as a plan computed by a version
 # nobody chose.
-reported=$("$binary" --version)
+reported=$("$binary" --version) ||
+    fail "$binary would not run: it exited non-zero on --version, so the tool cache holds something that is not a pgpushy binary"
 [ "$reported" = "pgpushy $version" ] ||
     fail "$binary reports '$reported', expected 'pgpushy $version'"
 

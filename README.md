@@ -153,6 +153,7 @@ jobs:
 | `comment` | `plan` only | `false` | Upsert the plan as a pull-request comment. |
 | `on-destructive` | `plan` only | `fail` | `fail` or `continue`: whether a destructive plan (exit 2) fails the step. Exit 1 fails it either way. |
 | `token` | no | `${{ github.token }}` | Used only to post that comment. |
+| `version` | no | | Not an input: declared only so a value left over from `v1` is refused by name. See [Upgrading from v1](#upgrading-from-v1). |
 
 `setup` installs the binary, puts it on `PATH`, and stops — for a workflow
 that wants to call pgpushy itself.
@@ -221,8 +222,8 @@ jobs:
       destructive: ${{ steps.plan.outputs.destructive }}
     steps:
       - id: plan
-        uses: arcanyx-pub/pgpushy-action@v1
-        with: { command: plan, version: 0.3.2, env: prod, on-destructive: continue }
+        uses: arcanyx-pub/pgpushy-action@v2
+        with: { command: plan, env: prod, on-destructive: continue }
 
   apply:
     needs: plan
@@ -416,6 +417,42 @@ passes, because it can change what gets reconciled (spec §10.1).
 The `pgpushy-version` output reports what was installed, for a workflow that
 wants to print it or assert on it.
 
+## Upgrading from v1
+
+Change the ref and delete the `version:` line:
+
+```yaml
+- uses: arcanyx-pub/pgpushy-action@v2
+  with:
+    command: plan
+    env: prod
+```
+
+That is the whole migration. Every other input and output means what it meant,
+and the step still fails on pgpushy's exit code.
+
+A `version:` left in place is **refused by name**, before anything is
+downloaded — the action declares the input for exactly that reason. A composite
+action is never handed an input it does not declare, so simply dropping it
+would have left the line reaching nothing while the run installed a pgpushy the
+workflow's author had not chosen, behind a runner warning that is easy to miss
+in a green log.
+
+Which pgpushy you get is now the action's ref: `@v2.0.0` names one exactly,
+`@v2` picks up whichever one the newest release was tested with. A workflow
+that wants that version in its log, or in an assertion, reads the
+`pgpushy-version` output:
+
+```yaml
+- id: setup
+  uses: arcanyx-pub/pgpushy-action@v2
+  with: { command: setup }
+
+- run: echo "planning with pgpushy ${{ steps.setup.outputs.pgpushy-version }}"
+```
+
+`v1` stays at 1.1.1 and is maintained for security fixes only.
+
 ## Versioning
 
 Pin the action to the moving major tag:
@@ -424,17 +461,15 @@ Pin the action to the moving major tag:
 uses: arcanyx-pub/pgpushy-action@v2
 ```
 
-`v2` moves as this action changes and will not break its inputs. Because each
-release names one pgpushy, what a repository's schema runs execute changes when
-that tag moves — pin `@v2.0.0` instead to hold both the action and its pgpushy
-exactly, which is also what an audit reads.
+`v2` moves as this action changes and will not break its inputs. Each release
+names one pgpushy, so moving that tag also moves the program a repository's
+schema runs execute — pin `@v2.0.0` to hold the action and its pgpushy still,
+which is also what an audit reads.
 
 Within `v2`, an input is never removed or given a different meaning and an
 output never changes what it reports; anything that would break a workflow
-written against `v2` is a `v3`. `v2` is a new major rather than a minor because
-GitHub only *warns* about an input an action does not declare: a `v1` that
-dropped the `version` input would have silently ignored the version a consumer
-had pinned. `v1` stays at 1.1.1, where `version` is required and works.
+written against `v2` is a `v3`. Moving from `v1` is one edit — see
+[Upgrading from v1](#upgrading-from-v1).
 
 ## Platforms
 

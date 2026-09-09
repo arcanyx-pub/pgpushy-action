@@ -33,7 +33,11 @@ pin="$root/pgpushy.pin"
 [ -f "$pin" ] || fail "$pin is missing"
 
 # The output of this recipe is a diff for a human to read, so it starts from a
-# tree where the only diff will be the one it wrote.
+# tree where the only diff will be the one it wrote — and from a checkout at
+# all, since `git status` outside one is an error this would otherwise read as
+# "clean".
+git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    fail "$root is not a git checkout; this rewrites a file for review as a diff"
 [ -z "$(git -C "$root" status --porcelain)" ] ||
     fail "working tree is dirty; commit or stash first, so the diff this prints is only the pin"
 
@@ -54,7 +58,14 @@ platforms=(linux-amd64 linux-arm64 darwin-amd64 darwin-arm64)
 base="https://github.com/arcanyx-pub/pgpushy/releases/download/v$version"
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+
+# The rewritten pin is staged beside the pin itself, so putting it in place is
+# a rename within one filesystem and no run can leave a half-written pin
+# behind — the same reason scripts/install.sh stages its download inside the
+# tool cache. The downloads stay in the system temp directory: 60 MB has no
+# business in the checkout, and only this one file has to land atomically.
+staged="$pin.new"
+trap 'rm -rf "$work"; rm -f "$staged"' EXIT
 
 # The API rather than the release page: `digest` is what GitHub computed when
 # the asset was uploaded, and it is the one of the three that is not a file
@@ -62,7 +73,7 @@ trap 'rm -rf "$work"' EXIT
 if ! gh api "repos/arcanyx-pub/pgpushy/releases/tags/v$version" \
     --jq '.assets[] | "\(.name) \(.digest)"' >"$work/digests" 2>"$work/gh.err"; then
     echo "bump-pgpushy: gh said: $(tr '\n' ' ' <"$work/gh.err")" >&2
-    fail "could not read the GitHub release v$version — is that version published?"
+    fail "could not read the GitHub release v$version — either that version is not published, or gh is not authenticated for this repository (check \`gh auth status\`)"
 fi
 
 echo "Fetching pgpushy v$version"
@@ -80,12 +91,23 @@ for platform in "${platforms[@]}"; do
         fail "could not download $base/$asset — the release publishes a binary for every platform this action installs on"
 
     computed=$(sha256_of "$work/$asset")
-    # sha256sum format, bare filenames: "<hex>  <name>".
-    published=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1; exit }' "$work/SHA256SUMS")
+    # sha256sum format, bare filenames: "<hex>  <name>". Every matching row is
+    # printed, not the first: two rows for one asset are a file to look at
+    # rather than a first row to trust.
+    published=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1 }' "$work/SHA256SUMS")
     api=$(awk -v name="$asset" '$1 == name { sub(/^sha256:/, "", $2); print $2; exit }' "$work/digests")
 
     [ -n "$published" ] || fail "the release's SHA256SUMS lists no $asset"
+    [ "$(printf '%s\n' "$published" | wc -l)" = 1 ] ||
+        fail "the release's SHA256SUMS has more than one row for $asset; nothing has been written"
     [ -n "$api" ] || fail "release v$version has no asset named $asset"
+
+    # GitHub records a digest when an asset is uploaded, and reports null for
+    # assets attached before it began doing so. That is a missing cross-check,
+    # not a mismatch, and saying "the three hashes disagree" about it would
+    # send a reader looking for a compromise that is not there.
+    [ "$api" != null ] ||
+        fail "the GitHub API reports no digest for $asset (this release predates GitHub's per-asset digests), so the computed hash has only SHA256SUMS to agree with; nothing has been written"
 
     if [ "$computed" != "$published" ] || [ "$computed" != "$api" ]; then
         echo "  computed   $computed" >&2
@@ -100,25 +122,28 @@ done
 
 # The comment block is prose about why this file exists and says nothing about
 # which version is pinned, so it is carried over and only the four rows are
-# rewritten.
-{
-    grep '^#' "$pin"
-    cat "$work/rows"
-} >"$work/pgpushy.pin"
-mv "$work/pgpushy.pin" "$pin"
-
-# The same check `just lint` and CI run, over what was just written: a bump
-# that produced a file the linter would reject should fail here, not there.
-"$root/scripts/pin-check.sh"
+# rewritten. A pin file with no comments at all would silently lose nothing and
+# is still not what this expects, so it says so rather than writing a file that
+# explains itself to nobody.
+grep '^#' "$pin" >"$work/header" ||
+    fail "$pin has no comment header to carry over; write the rows by hand or restore the file from git"
+cat "$work/header" "$work/rows" >"$staged"
+mv "$staged" "$pin"
 
 if git -C "$root" diff --quiet -- pgpushy.pin; then
     echo "pgpushy.pin already pins pgpushy $version, byte for byte; nothing changed."
-    exit 0
+else
+    echo
+    git -C "$root" --no-pager diff -- pgpushy.pin
+    echo
+    echo "Review the four hashes together with the version, then commit pgpushy.pin"
+    echo "and open a pull request. CI downloads the four assets and verifies them"
+    echo "against this file, and the e2e job runs the action against pgpushy v$version."
 fi
 
-echo
-git -C "$root" --no-pager diff -- pgpushy.pin
-echo
-echo "Review the four hashes together with the version, then commit pgpushy.pin"
-echo "and open a pull request. CI downloads the four assets and verifies them"
-echo "against this file, and the e2e job runs the action against pgpushy v$version."
+# The same check `just lint` and CI run, over what was just written: a bump
+# that produced a file the linter would reject, or that left the version named
+# in the README behind, should fail here rather than in CI. It runs last so
+# that the hashes are on screen either way — they are what the failure is
+# asking to be reviewed against.
+"$root/scripts/pin-check.sh"

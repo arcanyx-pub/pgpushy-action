@@ -13,9 +13,10 @@
 #
 # sha256sum format with bare filenames, so `sha256sum -c pgpushy.pin` verifies a
 # directory holding all four assets — which is what CI does on every run. The
-# version is the one in those asset names and is written nowhere else, so there
-# is no second copy for it to drift from; scripts/pin-check.sh requires all four
-# rows to agree on it.
+# version is the one in these asset names; the README's "Which pgpushy" section
+# also states it in prose, because a reader deciding whether to adopt this
+# action should not have to open a checksum file to find out what it runs.
+# scripts/pin-check.sh requires all four rows and that sentence to agree.
 #
 # Rewritten by `just bump-pgpushy <X.Y.Z>`, which refuses unless the hashes it
 # computes from the downloaded assets, the release's own SHA256SUMS, and
