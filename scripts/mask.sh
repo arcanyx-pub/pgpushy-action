@@ -26,27 +26,36 @@ set -euo pipefail
 readonly MIN_LENGTH=8
 
 mask() {
-    local name="$1" value="$2"
+    local name="$1" value="$2" escaped
 
     [ -n "$value" ] || return 0
-
-    # A workflow command is one line, and the runner reads the log a line at a
-    # time: half of a value carrying a newline would be masked and the rest
-    # would land in the log as ordinary text. Refusing to mask it prints
-    # nothing, which is the safe half of the choice.
-    if [ "$value" != "${value%%$'\n'*}" ]; then
-        echo "::warning::pgpushy-action: $name contains a newline and is not masked; a masked value has to fit on one line"
-        return 0
-    fi
 
     if [ "${#value}" -lt "$MIN_LENGTH" ]; then
         echo "::warning::pgpushy-action: $name is under $MIN_LENGTH characters, so it is not masked: the runner redacts every occurrence of a masked string, and a short one would black out unrelated text in this job's log"
         return 0
     fi
 
+    # The runner un-escapes a workflow command's data before the masker ever
+    # sees it: `%25` becomes a percent sign, `%0A` a newline, `%0D` a carriage
+    # return. So a password that literally contains `%25` — minted tokens are
+    # routinely percent-encoded — would register a *different* string than the
+    # one in the environment, and the real password would go on appearing in
+    # the log while the action reported it masked. Escaping is what makes the
+    # registered value the value; it is exactly what `@actions/core` does, and
+    # the percent has to go first or the escapes added below would themselves
+    # be escaped.
+    #
+    # It also settles the multi-line case, without a rule of our own: a value
+    # carrying newlines arrives at the runner whole, and the runner registers
+    # each of its lines. The floor above is measured on the value, so a
+    # multi-line password with one short line still gets that line masked.
+    escaped=${value//%/%25}
+    escaped=${escaped//$'\r'/%0D}
+    escaped=${escaped//$'\n'/%0A}
+
     # The only line that carries the value. The runner consumes this command
     # and prints the value back as `***`, which is the whole mechanism.
-    echo "::add-mask::$value"
+    echo "::add-mask::$escaped"
     # Named, never echoed: a fixed string, so a workflow can confirm the
     # masking happened without the log carrying the secret to confirm it with.
     echo "pgpushy-action: masked $name"

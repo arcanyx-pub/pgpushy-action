@@ -21,6 +21,9 @@ builder="$repo/scripts/comment-body.sh"
 # the conservative reading; this asserts the thing GitHub actually enforces.
 readonly GITHUB_LIMIT=65536
 
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
 failures=0
 check() {
     local what="$1" ok="$2"
@@ -52,18 +55,26 @@ fences_balanced() {
 # The step summary is this same builder with WITHOUT_MARKER=1. It has to be the
 # comment minus its marker and nothing else — one body, one truncation budget,
 # no second spelling of the plan that could drift from the first.
+#
+# Compared through files rather than through variables: a body's trailing bytes
+# are part of what is being asserted, and command substitution eats them.
 assert_markerless() {
-    local marked="$1" markerless="$2"
+    local code="$1" log="$2" plan="$3"
 
-    case "$markerless" in
-        *"<!-- pgpushy-action plan env="*) check "the marker-less body carries no marker" no ;;
-        *) check "the marker-less body carries no marker" yes ;;
-    esac
+    build "" "$code" "$log" "$plan" >"$work/marked"
+    build 1 "$code" "$log" "$plan" >"$work/markerless"
 
-    if [ "$markerless" = "$(tail -n +2 <<<"$marked")" ]; then
-        check "the marker-less body is the comment minus its first line" yes
+    if grep -qF '<!-- pgpushy-action plan env=' "$work/markerless"; then
+        check "the marker-less body carries no marker" no
     else
-        check "the marker-less body is the comment minus its first line" no
+        check "the marker-less body carries no marker" yes
+    fi
+
+    tail -n +2 "$work/marked" >"$work/marked-tail"
+    if cmp -s "$work/marked-tail" "$work/markerless"; then
+        check "the marker-less body is the comment minus its first line, byte for byte" yes
+    else
+        check "the marker-less body is the comment minus its first line, byte for byte" no
     fi
 }
 
@@ -119,7 +130,7 @@ for case_dir in "$here"/cases/*/; do
     code=$(cat "$case_dir/exit-code")
     body=$(build "" "$code" "$case_dir/plan.log" "$plan_dir")
     assert_body "$name" "$body" "$case_dir/expect"
-    assert_markerless "$body" "$(build 1 "$code" "$case_dir/plan.log" "$plan_dir")"
+    assert_markerless "$code" "$case_dir/plan.log" "$plan_dir"
 done
 
 # Built rather than committed: the point is a body the fixed parts alone would
@@ -127,7 +138,7 @@ done
 # to keep in a repository.
 oversized=$(mktemp -d)
 huge=""
-trap 'rm -rf "$oversized" "$huge"' EXIT
+trap 'rm -rf "$work" "$oversized" "$huge"' EXIT
 mkdir -p "$oversized/plan"
 {
     echo '  plan --env prod'
@@ -155,13 +166,13 @@ body=$(build "" 2 "$oversized/plan.log" "$oversized/plan")
 assert_body "oversized (generated)" "$body" "$oversized/expect"
 # Truncation included: the marker is dropped after the budget is spent, so a
 # body that had to be cut is cut in the same place either way.
-assert_markerless "$body" "$(build 1 2 "$oversized/plan.log" "$oversized/plan")"
+assert_markerless 2 "$oversized/plan.log" "$oversized/plan"
 
 # And the case the last resort exists for: 50 destructive steps whose names are
 # each two kilobytes, so the parts that are never truncated are themselves over
 # the budget and the whole body has to be cut.
 huge=$(mktemp -d)
-trap 'rm -rf "$oversized" "$huge"' EXIT
+trap 'rm -rf "$work" "$oversized" "$huge"' EXIT
 mkdir -p "$huge/plan"
 echo '  plan --env prod' >"$huge/plan.log"
 jq -n '{
@@ -178,7 +189,7 @@ jq -n '{
 echo '... truncated: this comment did not fit. See the workflow run log.' >"$huge/expect"
 body=$(build "" 2 "$huge/plan.log" "$huge/plan")
 assert_body "unbounded names (generated)" "$body" "$huge/expect"
-assert_markerless "$body" "$(build 1 2 "$huge/plan.log" "$huge/plan")"
+assert_markerless 2 "$huge/plan.log" "$huge/plan"
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures check(s) failed" >&2

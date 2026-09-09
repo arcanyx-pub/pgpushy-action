@@ -59,7 +59,9 @@ jobs:
           PGPASSWORD: ${{ secrets.DB_PREVIEW_PASSWORD }}
 
       # The reviewed object. A destructive plan exits 2 and fails the step
-      # above, so nothing reaches here for a human to approve by accident.
+      # above, so nothing reaches here for a human to approve by accident —
+      # which is what `on-destructive: continue` would give up, and why a
+      # workflow that sets it gates this step on the `destructive` output.
       - uses: actions/upload-artifact@v7
         with:
           name: pgpushy-plan
@@ -190,6 +192,44 @@ rather route on a destructive plan than stop on it says so with
 2, the artifact still lists every destructive step, and nothing is applied —
 the input changes only how the step reports the finding.
 
+What it does change is the **gate that step failure was providing**. By
+default a destructive plan fails the plan job, and everything downstream of it
+— the artifact upload, and any job with `needs: plan` — is skipped. Ask the
+step to succeed and all of that runs: the artifact uploads, the apply job
+starts, and `apply` passes `--auto-approve`. The only gate left is the required
+reviewers on the deploy `environment:`, which is a human reading a diff rather
+than a pipeline that stopped.
+
+So a workflow that turns the failure off puts the gate back explicitly, on the
+`destructive` output — on the upload, so a destructive plan never becomes an
+approvable artifact:
+
+```yaml
+- if: steps.plan.outputs.destructive != 'true'
+  uses: actions/upload-artifact@v7
+  with:
+    name: pgpushy-plan
+    path: ./plan
+```
+
+and, when the apply is a separate job, on the job itself — a step's outputs do
+not cross a job boundary, so the plan job has to publish one:
+
+```yaml
+jobs:
+  plan:
+    outputs:
+      destructive: ${{ steps.plan.outputs.destructive }}
+    steps:
+      - id: plan
+        uses: arcanyx-pub/pgpushy-action@v1
+        with: { command: plan, version: 0.3.2, env: prod, on-destructive: continue }
+
+  apply:
+    needs: plan
+    if: github.event_name == 'push' && needs.plan.outputs.destructive != 'true'
+```
+
 Use `continue-on-error: true` for the other half: reading `exit-code` after a
 run that **failed**, a refusal included. Without it a failed step skips every
 later step by its implicit `success()`, and there is nothing left to read the
@@ -239,6 +279,16 @@ before this action are not covered, and a value under eight characters is left
 alone: the runner redacts every occurrence of a masked string anywhere in the
 log, so masking a short one would black out unrelated text.
 
+That last part is inherent, not a threshold. A password that happens to equal
+an identifier — an environment name, a schema, a table — blacks out that word
+wherever the runner redacts: the job log, and the step summary, which the
+runner scrubs before it uploads it. A plan reading `DROP TABLE ***.orders` in
+the summary is the masker working as designed, and the fix is a password that
+is not also a word the schema uses. The pull-request comment is the exception,
+and not a reassuring one: it is posted through the API rather than written to
+the log, so it is never scrubbed, and a plan that quotes a masked value quotes
+it in full there.
+
 ## Never use this with `pull_request_target`
 
 `pull_request_target` runs the base branch's workflow with the repository's
@@ -282,9 +332,14 @@ one: a destructive plan fails the plan job, and the gated apply job never runs.
 to proceed — an environment with `allow_destructive = true` exits 0 and still
 reports `true`.
 
-`on-destructive: continue` is a different thing again, and does not belong in
-this section's argument: it permits nothing, changing only whether the *step*
-fails on a finding pgpushy has already made and blocked.
+`on-destructive: continue` permits nothing in pgpushy — it still exits 2, the
+artifact still records every drop, and nothing is applied — but it **does**
+give up the paragraph above. A plan job that succeeds is a plan job whose
+artifact uploads and whose `needs:` dependents run, so the workflow has to
+re-state the gate on the `destructive` output, on the upload and on the apply
+job, as [Outputs](#outputs) shows. That is the trade the input offers: the
+finding becomes data the workflow routes on, and routing it is then the
+workflow's job.
 
 ## Permissions
 
@@ -322,6 +377,10 @@ and scrolling the log; on the summary page it is the first thing under the run.
 The comment's truncation applies unchanged: a step summary may be 1 MiB where a
 comment may be 64 KB, but one budget means the two are the same plan, and a
 plan that overruns 60 KB is one to read in the artifact rather than in either.
+The one difference is not this action's doing: the runner scrubs the summary
+through the secret masker before uploading it, and the comment goes out through
+the API unscrubbed, so a plan quoting a masked value reads `***` in the summary
+and reads the value in the comment.
 
 ## Versioning
 
