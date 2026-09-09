@@ -27,26 +27,6 @@ major version is what consumers pin, since `@v1` is a tag that moves.
   `::error::`. A destructive plan reported under `on-destructive: continue` is
   now a `::notice::`, so the finding lands in the run's annotations.
 
-### Changed
-
-- README: `on-destructive: continue` gives up the gate the plan step's failure
-  was providing. A plan job that succeeds is one whose artifact uploads and
-  whose `needs:` dependents run — an `apply` job included, which passes
-  `--auto-approve` — leaving the deploy environment's required reviewers as the
-  only gate. The documented shape now puts that gate back explicitly, on the
-  `destructive` output: on the upload step, and on the apply job's `if:` by way
-  of a job output. It still permits nothing in pgpushy, which exits 2 and
-  records every drop in the artifact.
-- README: the step summary and the pull-request comment are the same body, but
-  not the same bytes — the runner scrubs the summary through the secret masker
-  before uploading it and the comment is posted through the API unscrubbed, and
-  a password that equals an identifier blacks that word out wherever the
-  redaction reaches.
-- `mask.sh` and `exit.sh` are checked against fixture tables, run by `just lint`
-  and by CI: password shapes to expected output, including a local
-  reimplementation of the runner's un-escape that asserts the round trip lands
-  on the password that went in, and the exit step's whole truth table.
-
 ## [1.1.0] - 2026-09-09
 
 ### Added
