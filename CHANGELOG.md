@@ -7,25 +7,15 @@ major version is what consumers pin, since `@v1` is a tag that moves.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-09-09
+
 ### Fixed
 
-- The value handed to the log masker is escaped the way `@actions/core` escapes
-  a workflow command's data — `%` to `%25`, carriage return to `%0D`, newline
-  to `%0A`. The runner un-escapes that data before the masker sees it, so a
-  password containing `%25`, `%0A` or `%0D` literally — a minted token is
-  routinely percent-encoded — registered a *different* string than the one in
-  the environment: the step reported "masked" and the log went on showing the
-  password.
-- A password carrying a carriage return or a newline is masked rather than
-  refused, and no longer has its tail printed. The runner ends a log line on a
-  carriage return as well as a newline, so a value containing one used to reach
-  the log unmasked past that point; escaping keeps the whole value inside one
-  command, and the runner registers each line of a multi-line secret itself.
-- `exit.sh` rejects an exit code outside pgpushy's contract instead of passing
-  it to `exit`, which takes its argument modulo 256 and would report 256 as a
-  success; a missing code is an error rather than a guess, and both say so as
-  `::error::`. A destructive plan reported under `on-destructive: continue` is
-  now a `::notice::`, so the finding lands in the run's annotations.
+- Masked passwords are escaped the way the runner expects, so a value
+  containing `%25`, `%0A` or `%0D`, or a carriage return, is actually masked.
+  See [#6](https://github.com/arcanyx-pub/pgpushy-action/pull/6).
+- The exit step rejects an exit code outside 0, 1 and 2 instead of passing it
+  to `exit`, and reports a routed destructive plan as a notice.
 
 ## [1.1.0] - 2026-09-09
 
