@@ -7,6 +7,8 @@ major version is what consumers pin, since `@v2` is a tag that moves.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-09
+
 ### Changed
 
 - The action pins one pgpushy release and ships the SHA-256 of each of its
