@@ -24,7 +24,7 @@ forbid() {
     fi
 }
 
-: "${COMMAND:?}" "${VERSION:?}"
+: "${COMMAND:?}"
 : "${PGPUSHY_ENV:=}" "${CONFIG:=}" "${PLAN_OUT:=}" "${PLAN:=}" "${COMMENT:=}"
 : "${ON_DESTRUCTIVE:=}" "${WORKING_DIRECTORY:=.}"
 
@@ -33,19 +33,6 @@ case "$COMMAND" in
     "") fail "'command' is required (setup, validate, generate-check, plan, apply)" ;;
     *) fail "unknown command '$COMMAND' (expected setup, validate, generate-check, plan or apply)" ;;
 esac
-
-# No "latest". A schema tool that changed under a repository between two runs
-# of the same workflow would make a plan and its apply different programs, and
-# the version is the cheapest thing in this file to pin.
-case "$VERSION" in
-    "") fail "'version' is required, e.g. version: 0.3.2" ;;
-    latest | LATEST)
-        fail "'version' must name a release, e.g. 0.3.2 — there is no 'latest', because a schema tool should not change under a repository between runs"
-        ;;
-esac
-if ! [[ "${VERSION#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
-    fail "'version' is not a pgpushy release version: '$VERSION' (expected e.g. 0.3.2 or v0.3.2)"
-fi
 
 # --env selects the target and is required for exactly the two commands that
 # have one; validate and generate connect to nothing, and the CLI refuses the
@@ -105,4 +92,4 @@ if [ "$COMMAND" = plan ]; then
     fi
 fi
 
-echo "pgpushy-action: $COMMAND, pgpushy ${VERSION#v}"
+echo "pgpushy-action: $COMMAND"

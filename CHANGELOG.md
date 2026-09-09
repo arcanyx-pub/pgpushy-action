@@ -3,9 +3,23 @@
 All notable changes to this action are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) — where the
-major version is what consumers pin, since `@v1` is a tag that moves.
+major version is what consumers pin, since `@v2` is a tag that moves.
 
 ## [Unreleased]
+
+### Changed
+
+- The action pins one pgpushy release and ships the SHA-256 of each of its
+  binaries in `pgpushy.pin`; the install verifies against that, not the
+  release page. See [#5](https://github.com/arcanyx-pub/pgpushy-action/pull/5).
+
+### Added
+
+- `pgpushy-version` output.
+
+### Removed
+
+- The `version` input. Pin pgpushy by pinning the action; `v1` keeps the input.
 
 ## [1.1.1] - 2026-09-09
 

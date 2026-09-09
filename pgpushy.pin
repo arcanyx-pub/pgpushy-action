@@ -1,0 +1,26 @@
+# The pgpushy release this action installs, and the SHA-256 of each of the
+# four binaries that release publishes.
+#
+# One pinned version, and no input to override it: this action's end-to-end
+# tests run exactly one pgpushy, so any other version would be a compatibility
+# claim nothing here checks. A consumer pins pgpushy by pinning the action.
+#
+# The hashes ship with the action rather than being read from the release at
+# install time. A SHA256SUMS fetched from the same origin as the binary catches
+# a corrupted download and nothing else; a table reviewed alongside the version
+# bump that introduces it catches a release that was replaced. That is the
+# argument pgpushy makes for pgschema (pgpushy spec §8.5), pointed one level up.
+#
+# sha256sum format with bare filenames, so `sha256sum -c pgpushy.pin` verifies a
+# directory holding all four assets — which is what CI does on every run. The
+# version is the one in those asset names and is written nowhere else, so there
+# is no second copy for it to drift from; scripts/pin-check.sh requires all four
+# rows to agree on it.
+#
+# Rewritten by `just bump-pgpushy <X.Y.Z>`, which refuses unless the hashes it
+# computes from the downloaded assets, the release's own SHA256SUMS, and
+# GitHub's per-asset digests all agree.
+8d7c8f40c6971b0eb536a4ad5e1c968df30141c571f9471af36cdd49ebdd20da  pgpushy-0.3.2-linux-amd64
+70070959b0325295e333437078980f7283e98ab2806fe7ee7678716f58d66657  pgpushy-0.3.2-linux-arm64
+0f97ad0c4b6762026e883c43cf269b40e7cfd991f30f4519c014394bd0a18eec  pgpushy-0.3.2-darwin-amd64
+5b57de505c0ab96fc19bb78978ba0ec7974c7f935f27012aea7205d99b1f443a  pgpushy-0.3.2-darwin-arm64
