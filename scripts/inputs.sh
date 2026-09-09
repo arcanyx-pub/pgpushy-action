@@ -24,7 +24,7 @@ forbid() {
     fi
 }
 
-: "${COMMAND:?}"
+: "${COMMAND:?}" "${VERSION:=}"
 : "${PGPUSHY_ENV:=}" "${CONFIG:=}" "${PLAN_OUT:=}" "${PLAN:=}" "${COMMENT:=}"
 : "${ON_DESTRUCTIVE:=}" "${WORKING_DIRECTORY:=.}"
 
@@ -33,6 +33,14 @@ case "$COMMAND" in
     "") fail "'command' is required (setup, validate, generate-check, plan, apply)" ;;
     *) fail "unknown command '$COMMAND' (expected setup, validate, generate-check, plan or apply)" ;;
 esac
+
+# `version` is declared by this action for one purpose: to be refused here.
+# A composite action is never handed an input it does not declare, so dropping
+# it from action.yml would leave a workflow's `version:` reaching nothing and
+# the run installing a release its author did not choose — the runner warns
+# about the unknown input and nothing fails (actions/runner#665).
+[ -z "$VERSION" ] ||
+    fail "'version' is not an input of this action: it pins one pgpushy release and verifies it against a hash it ships. Remove the 'version: $VERSION' line and pin pgpushy by pinning the action — see 'Upgrading from v1' in the README. The 'pgpushy-version' output reports what was installed."
 
 # --env selects the target and is required for exactly the two commands that
 # have one; validate and generate connect to nothing, and the CLI refuses the

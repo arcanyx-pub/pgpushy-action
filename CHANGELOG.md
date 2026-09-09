@@ -19,7 +19,8 @@ major version is what consumers pin, since `@v2` is a tag that moves.
 
 ### Removed
 
-- The `version` input. Pin pgpushy by pinning the action; `v1` keeps the input.
+- The `version` input; a workflow that still sets it is refused by name. Pin
+  pgpushy by pinning the action; `v1` keeps the input.
 
 ## [1.1.1] - 2026-09-09
 

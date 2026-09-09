@@ -81,9 +81,10 @@ move would make it a formality. So:
 3. **Stamp the CHANGELOG** — the pinned pgpushy is a `### Changed` entry,
    because it changes what every consumer of the moving tag runs — and update
    the version the README's [Which pgpushy](../README.md#which-pgpushy) section
-   names. That sentence is the only copy of the version outside `pgpushy.pin`,
-   and it is there because a reader deciding whether to adopt the action should
-   not have to open a checksum file to find out what it runs.
+   names. That sentence is there because a reader deciding whether to adopt the
+   action should not have to open a checksum file to find out what it runs, and
+   `scripts/pin-check.sh` fails when it and the pin disagree, so `just lint`
+   catches a forgotten edit.
 4. **Merge, then `just release X.Y.Z`.**
 
 `just lint` and the `pin` job both run `scripts/pin-check.sh`, which is shape
