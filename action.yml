@@ -86,8 +86,12 @@ inputs:
       them route to different people.
 
       This is not `allow_destructive`. pgpushy still exits 2, the artifact
-      still records every destructive step, and nothing is applied; only the
-      step's outcome changes.
+      still records every destructive step, and nothing is applied.
+
+      What it does change is what the step's failure was gating: a plan job
+      that succeeds is one whose artifact uploads and whose `needs:`
+      dependents run. A workflow that sets this puts that gate back on the
+      `destructive` output.
     required: false
     default: fail
   token:

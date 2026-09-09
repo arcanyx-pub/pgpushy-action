@@ -28,14 +28,18 @@ warn() {
 
 # The same body the pull-request comment carries, minus the hidden marker: the
 # marker exists so a comment can be found again and edited, and a step summary
-# is never looked up. Appended, because the summary is a job-wide document that
-# other steps also write to.
+# is never looked up. Appended because that is what the workflow command asks
+# for; the file is this step's own and the runner hands it over empty, so there
+# is nothing here to append to or to clobber.
 #
 # It keeps the comment's 60,000-byte truncation too, though a step summary may
 # be 1 MiB. One budget is worth more here than the extra room: the summary and
 # the comment are the same plan, a reviewer who reads both should not find one
 # of them longer, and a plan that overruns 60 KB is one to read in the artifact
-# rather than in either.
+# rather than in either. "The same plan" is as far as the claim goes: the
+# runner scrubs this file through the secret masker before uploading it, and
+# the comment goes out through `gh api` unscrubbed, so a plan that quotes a
+# masked value reads `***` here and reads the value there.
 if ! WITHOUT_MARKER=1 "$GITHUB_ACTION_PATH/scripts/comment-body.sh" >>"$GITHUB_STEP_SUMMARY"; then
     warn "could not write the plan to the step summary"
 fi

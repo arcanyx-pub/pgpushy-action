@@ -7,11 +7,13 @@ actionlint := justfile_directory() / ".actionlint" / "actionlint"
 default:
     @just --list
 
-# Lint the workflows and every script, and run the comment body checks
+# Lint the workflows and every script, and run the fixture checks
 lint: _actionlint
     {{ actionlint }} -color
-    shellcheck scripts/*.sh .github/fixtures/comment/check.sh
+    shellcheck scripts/*.sh .github/fixtures/*/check.sh
     bash .github/fixtures/comment/check.sh
+    bash .github/fixtures/mask/check.sh
+    bash .github/fixtures/exit/check.sh
 
 # Fetch the pinned actionlint into .actionlint/ if it is not already there
 #

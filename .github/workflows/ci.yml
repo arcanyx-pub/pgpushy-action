@@ -56,17 +56,21 @@ jobs:
 
       # actionlint reads the workflows; the action's own logic lives in
       # scripts/ precisely so that it can be checked directly.
-      - run: shellcheck scripts/*.sh .github/fixtures/comment/check.sh
+      - run: shellcheck scripts/*.sh .github/fixtures/*/check.sh
 
-  # No database, no pull request, no token. The comment body builder is the
-  # part of this action a hostile branch can reach — a plan echoes the DDL it
-  # was given — so it is checked against fixtures that try to escape it.
-  comment-body:
-    name: Comment body
+  # No database, no pull request, no token, no runner. These are the parts of
+  # the action worth running against a table of inputs: the body a hostile
+  # branch can reach — a plan echoes the DDL it was given — the escaping that
+  # decides what the log masker actually registers, and the step that decides
+  # whether a run failed. `just lint` runs the same three.
+  fixtures:
+    name: Fixtures
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - run: bash .github/fixtures/comment/check.sh
+      - run: bash .github/fixtures/mask/check.sh
+      - run: bash .github/fixtures/exit/check.sh
 
   install:
     name: Install on ${{ matrix.runner }}
@@ -364,20 +368,23 @@ jobs:
           test "$(jq -r '.total.destructive' "$PROJECT/plan/summary.json")" = "0"
           test "$(jq -r '.total.steps' "$PROJECT/plan/summary.json")" -gt 0
 
-      # The plan step above wrote its summary already; a step's
+      # The plan step above wrote its summary already, and a step's
       # $GITHUB_STEP_SUMMARY is not readable from a later one, so the same
       # script is run again over the same artifact and log against a file this
-      # job can read.
+      # job can read. The redirection is exported inside the script rather than
+      # set in `env:`, because the runner applies its own GITHUB_* variables
+      # after a step's env and would overwrite it there.
       - name: The plan reaches the step summary, without the comment marker
         env:
-          GITHUB_STEP_SUMMARY: ${{ runner.temp }}/summary.md
-          GITHUB_ACTION_PATH: ${{ github.workspace }}
           PGPUSHY_ENV: ci
           EXIT_CODE: "0"
           PLAN_DIR: ${{ github.workspace }}/pgpushy-src/example/plan
         run: |
           set -euo pipefail
-          LOG_FILE="$RUNNER_TEMP/pgpushy-plan.log" ./scripts/summary.sh
+          export GITHUB_STEP_SUMMARY="$RUNNER_TEMP/pgpushy-summary-check.md"
+          export GITHUB_ACTION_PATH="$GITHUB_WORKSPACE"
+          export LOG_FILE="$RUNNER_TEMP/pgpushy-plan.log"
+          ./scripts/summary.sh
           test -s "$GITHUB_STEP_SUMMARY"
           grep -q '^### ' "$GITHUB_STEP_SUMMARY"
           grep -q 'pgpushy plan' "$GITHUB_STEP_SUMMARY"
@@ -549,6 +556,10 @@ jobs:
         run: |
           set -euo pipefail
           cp -r "$PROJECT" pgpushy-src/example-refused
+          # Without the plan artifacts this job has written into the project:
+          # the copy is a source tree under test, and an artifact carried along
+          # would be a plan from another run sitting where a fresh one goes.
+          rm -rf pgpushy-src/example-refused/plan pgpushy-src/example-refused/plan-*
           echo 'CREATE VIEW busted AS SELECT 1 AS x;' \
             > pgpushy-src/example-refused/db/schema/app/busted.sql
 
@@ -583,4 +594,20 @@ jobs:
           working-directory: pgpushy-src/example
           on-destructive: continue
 
-      - run: test "${{ steps.on-destructive-misused.outcome }}" = "failure"
+      - name: on-destructive is refused by name, not just refused
+        env:
+          COMMAND: validate
+          VERSION: ${{ env.PGPUSHY_VERSION }}
+          ON_DESTRUCTIVE: continue
+        run: |
+          set -euo pipefail
+          test "${{ steps.on-destructive-misused.outcome }}" = "failure"
+          # The action's own error goes to the runner log, which a later step
+          # cannot read, so the message is checked by running the script the
+          # action ran with the inputs it was given. Every refusal exits 1, so
+          # the status alone would not say which input was wrong.
+          if out=$(./scripts/inputs.sh 2>&1); then
+            echo "inputs.sh accepted on-destructive on a validate: $out" >&2
+            exit 1
+          fi
+          grep -qF "::error::pgpushy-action: 'on-destructive' applies to the 'plan' command only" <<< "$out"
