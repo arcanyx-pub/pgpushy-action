@@ -7,6 +7,8 @@ major version is what consumers pin, since `@v2` is a tag that moves.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-10
+
 ### Added
 
 - `password-command` and `plan-password-command`: the action mints the database
