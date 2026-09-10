@@ -44,6 +44,16 @@ file_mode() {
     stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
 }
 
+# mint.sh writes the command's raw output to a scratch file beside the password
+# file, and that file holds the password too. Nothing may leave one behind.
+scratch_left() {
+    local f
+    for f in "$password_file".*; do
+        [ -e "$f" ] && return 0
+    done
+    return 1
+}
+
 # The last run's status, stdout and stderr. Each case reads whichever of them
 # it is about.
 status=0
@@ -81,6 +91,12 @@ expect_password() {
         check "$what" no
         diff -u "$work/want" "$password_file" | sed 's/^/        /' || true
     fi
+
+    if scratch_left; then
+        check "$what -> leaves no scratch file" no
+    else
+        check "$what -> leaves no scratch file" yes
+    fi
 }
 
 # A refusal is only useful if it names the input, and it is only safe if the
@@ -109,10 +125,10 @@ expect_refusal() {
         check "$what -> never prints what the command produced" yes
     fi
 
-    if [ -e "$password_file" ]; then
-        check "$what -> writes no password file" no
+    if [ -e "$password_file" ] || scratch_left; then
+        check "$what -> writes no password file, and leaves no scratch file" no
     else
-        check "$what -> writes no password file" yes
+        check "$what -> writes no password file, and leaves no scratch file" yes
     fi
 }
 
@@ -173,20 +189,6 @@ else
     check "a percent-encoded token is escaped the way mask.sh escapes it (got: $(cat "$work/out"))" no
 fi
 
-# The floor is the same floor, and it is about masking rather than about the
-# password: a short value is still handed to pgpushy, it is just not registered
-# with a masker that would black out every occurrence of it in the log.
-run_mint "printf '%s\\n' short"
-if grep -q '^::warning::pgpushy-action: PGPASSWORD is under 8 characters' "$work/out"; then
-    check "a short password says why it is not masked" yes
-else
-    check "a short password says why it is not masked" no
-fi
-if [ "$(cat "$password_file")" = short ] && ! grep -q '^::add-mask::' "$work/out"; then
-    check "a short password is still handed on, just not masked" yes
-else
-    check "a short password is still handed on, just not masked" no
-fi
 
 echo "mint.sh: the file it hands to the run step"
 
@@ -252,6 +254,41 @@ expect_refusal "a password with a newline in the middle" \
     "printf '%s\\n%s\\n' line-one-abc line-two-def" \
     "'password-command' produced a password containing a newline" line-one-abc
 
+expect_refusal "a command that prints only whitespace" \
+    "printf '   \\n'" \
+    "'password-command' produced an empty password" ""
+
+# No credential API mints eight characters. A short result is an error string
+# or a truncated read, and the runner's masker would decline to register it —
+# so it is refused here rather than handed to pgpushy unmasked.
+expect_refusal "a result too short to be a credential" \
+    "printf '%s\\n' short" \
+    "'password-command' produced a password shorter than 8 characters" ""
+
+expect_refusal "seven characters is still too short" \
+    "printf '%s\\n' seven77" \
+    "'password-command' produced a password shorter than 8 characters" ""
+
+expect_password "eight characters is a password" \
+    "printf '%s\\n' eight888" eight888
+
+# The carriage return a CRLF minter leaves behind once the trailing newline is
+# stripped. Trimming it would mean connecting with something the command did
+# not print, so it is refused by name like any other line break.
+expect_refusal "a CRLF minter" \
+    "printf '%s\\r\\n' minted-token-123" \
+    "'password-command' produced a password containing a carriage return" minted-token-123
+
+expect_refusal "a carriage return in the middle" \
+    "printf 'first-half\\rsecond-half\\n'" \
+    "'password-command' produced a password containing a carriage return" second-half
+
+# Bash drops a NUL from a command substitution and carries on, which would make
+# the password something other than what the command printed.
+expect_refusal "output containing a NUL byte" \
+    "printf 'minted\\000token-123\\n'" \
+    "'password-command' produced output containing a NUL byte" token-123
+
 expect_refusal "a command that fails after printing" \
     "printf '%s\\n' never-logged-token; exit 3" \
     "'password-command' exited 3" never-logged-token
@@ -266,12 +303,38 @@ expect_refusal "a pipeline whose first stage fails" \
     "no-such-minting-cli | tr -d ' '" \
     "'password-command' exited" ""
 
+echo "mint.sh: a job that asked bash to trace everything"
+
+# SHELLOPTS is exported into every step by anything that writes it to
+# GITHUB_ENV, and a bash that starts with xtrace on traces each expansion to
+# standard error — which is the log, before the mask exists. The script turns
+# it off before it touches the value, and the minting command inherits the
+# switch in that state.
+run_mint "printf '%s\\n' minted-token-123" SHELLOPTS=xtrace
+if [ "$status" = 0 ] && [ "$(cat "$password_file")" = minted-token-123 ]; then
+    check "SHELLOPTS=xtrace still mints the password" yes
+else
+    check "SHELLOPTS=xtrace still mints the password (exit $status)" no
+fi
+if [ "$(grep -cF minted-token-123 "$work/out")" = 1 ] && ! grep -qF minted-token-123 "$work/err"; then
+    check "SHELLOPTS=xtrace traces the value onto neither stream" yes
+else
+    check "SHELLOPTS=xtrace traces the value onto neither stream (out $(grep -cF minted-token-123 "$work/out"), err $(grep -cF minted-token-123 "$work/err"))" no
+fi
+
 echo "mint.sh: a command that never returns"
 
 expect_refusal "a command that outlives the timeout" \
     "sleep 30" \
     "'password-command' did not produce a password within 2s" "" \
     PGPUSHY_ACTION_MINT_TIMEOUT=2
+
+# A minter that ignores the deadline's first signal is killed five seconds
+# later, and that is still a timeout rather than an ordinary non-zero exit.
+expect_refusal "a command that ignores the deadline's signal" \
+    'trap "" TERM; sleep 30' \
+    "'password-command' did not produce a password within 1s" "" \
+    PGPUSHY_ACTION_MINT_TIMEOUT=1
 
 # The macOS half of the same guard. GNU coreutils' timeout is on every Linux
 # runner and on no macOS one, so the script falls back to a watchdog of its
@@ -298,6 +361,23 @@ if [ "$status" = 0 ] && [ "$(cat "$password_file")" = minted-token-123 ]; then
     check "a command that returns is not waited on by the watchdog" yes
 else
     check "a command that returns is not waited on by the watchdog" no
+fi
+
+# GNU timeout signals the command's whole process group, so a minter that
+# backgrounded something does not outlive its own deadline. The watchdog has to
+# do the same, and this is the case that tells the two apart: the background
+# child writes a marker after the deadline has passed, and must never get to.
+marker="$work/the-child-outlived-the-mint"
+rm -f "$marker"
+expect_refusal "a minter's background child dies with it, on a runner with no timeout(1)" \
+    "(sleep 3; printf x >'$marker') & sleep 30" \
+    "'password-command' did not produce a password within 1s" "" \
+    PGPUSHY_ACTION_MINT_TIMEOUT=1 "PATH=$work/bin"
+sleep 4
+if [ -e "$marker" ]; then
+    check "the killed minter's background child wrote nothing afterwards" no
+else
+    check "the killed minter's background child wrote nothing afterwards" yes
 fi
 
 echo "mint.sh: the plan database's password is the same script"

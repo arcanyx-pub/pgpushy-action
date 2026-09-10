@@ -286,6 +286,20 @@ jobs:
           [env.minted]
           db   = "shop"
           user = "minter"
+
+          # The same target through an external plan database (spec §10.4),
+          # which is a separate server with separate credentials — a second
+          # password, and so a second minting command. A separate environment
+          # from [env.minted] because an external plan database accumulates:
+          # this project has cross-schema references, so it plans against a
+          # given plan database once.
+          [env.minted_plan]
+          db   = "shop"
+          user = "minter"
+
+          [env.minted_plan.plan_db]
+          db   = "shop_plan"
+          user = "planner"
           TOML
           sed 's/^\[env.ci\]$/[env.ci]\nallow_destructive = true/' \
             "$PROJECT/pgpushy.ci.toml" > "$PROJECT/pgpushy.allow.toml"
@@ -306,15 +320,27 @@ jobs:
       # schema must already exist (spec §6.1). The list is read out of the
       # example's own configuration rather than written twice.
       #
-      # `minter` reaches the same database under a password of its own, which
-      # is what makes the minting section below testable: the value the action
-      # mints has to be one this job does not have in its environment anyway.
+      # `minter` reaches the same database under a password of its own, and
+      # `planner` owns the external plan database under a third: that is what
+      # makes the minting section below testable, because the value the action
+      # mints has to be one this job does not otherwise have in its
+      # environment.
+      #
+      # Superuser is a CI shortcut and not a recommendation. It is here because
+      # a role with only CONNECT and USAGE cannot introspect a table it does
+      # not own, so it would plan every object as new (measured), and the
+      # assertion that the minted plan is empty — the one that proves the
+      # minted password really reached a working connection — would pass for
+      # the wrong reason. A real deployment gives these roles the grants
+      # pgpushy needs, which is a pgpushy question rather than an action one.
       - name: Create the target databases and their managed schemas
         run: |
           set -euo pipefail
           read -ra schema_list <<< "$MANAGED_SCHEMAS"
           psql -h localhost -U postgres -d postgres \
-            -c "CREATE ROLE minter LOGIN SUPERUSER PASSWORD 'minted-ci-password'"
+            -c "CREATE ROLE minter LOGIN SUPERUSER PASSWORD 'minted-ci-password'" \
+            -c "CREATE ROLE planner LOGIN SUPERUSER PASSWORD 'plan-db-ci-password'" \
+            -c "CREATE DATABASE shop_plan OWNER planner"
           for db in shop shop_other; do
             psql -h localhost -U postgres -d postgres -c "CREATE DATABASE $db"
             for schema in "${schema_list[@]}"; do
@@ -543,6 +569,10 @@ jobs:
           test "${{ steps.minted-plan.outputs.exit-code }}" = "0"
           test "${{ steps.minted-plan.outputs.destructive }}" = "false"
           test -f "$PROJECT/plan-minted/summary.json"
+          # Empty, like the re-plan above: a password that did not reach a
+          # working connection could not have produced this, and a role that
+          # could connect but not introspect would plan every object as new.
+          test "$(jq -r '.total.steps' "$PROJECT/plan-minted/summary.json")" = "0"
           # The file the minting step wrote is gone: the step that runs pgpushy
           # reads it into its own environment and deletes it, and the action
           # deletes it again at the end whatever the outcome was.
@@ -575,6 +605,35 @@ jobs:
           grep -qF "::add-mask::$MINTED_PASSWORD" <<< "$out"
           test "$(cat "$PASSWORD_FILE")" = "$MINTED_PASSWORD"
           rm -f "$PASSWORD_FILE"
+
+      # Both passwords minted at once: the target's, and the external plan
+      # database's, which is a separate server with separate credentials
+      # (spec §10.4) and so a second command.
+      - id: minted-plan-db
+        uses: ./
+        with:
+          command: plan
+          env: minted_plan
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+          plan-out: ./plan-minted-db
+          password-command: printf '%s\n' "$MINTED_PASSWORD"
+          plan-password-command: printf '%s\n' "$MINTED_PLAN_PASSWORD"
+        env:
+          PGPASSWORD: ""
+          MINTED_PASSWORD: minted-ci-password
+          MINTED_PLAN_PASSWORD: plan-db-ci-password
+
+      - name: The plan database's password was minted too, and stayed here as well
+        run: |
+          set -euo pipefail
+          test "${{ steps.minted-plan-db.outcome }}" = "success"
+          test "${{ steps.minted-plan-db.outputs.exit-code }}" = "0"
+          test "$(jq -r '.total.steps' "$PROJECT/plan-minted-db/summary.json")" = "0"
+          test ! -e "$RUNNER_TEMP/pgpushy-action-password"
+          test ! -e "$RUNNER_TEMP/pgpushy-action-plan-password"
+          test "$(env | grep -c minted-ci-password || true)" = "0"
+          test "$(env | grep -c plan-db-ci-password || true)" = "0"
 
       - id: minter-fails
         continue-on-error: true
