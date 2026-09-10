@@ -7,6 +7,13 @@ major version is what consumers pin, since `@v2` is a tag that moves.
 
 ## [Unreleased]
 
+### Added
+
+- `password-command` and `plan-password-command`: the action mints the database
+  password itself, so a credential no secret store has seen is masked before it
+  exists anywhere else and never enters `GITHUB_ENV`. See
+  [#9](https://github.com/arcanyx-pub/pgpushy-action/pull/9).
+
 ## [2.0.0] - 2026-09-09
 
 ### Changed
