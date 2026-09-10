@@ -15,6 +15,7 @@ lint: _actionlint
     ./scripts/pin-check.sh
     bash .github/fixtures/comment/check.sh
     bash .github/fixtures/mask/check.sh
+    bash .github/fixtures/mint/check.sh
     bash .github/fixtures/exit/check.sh
 
 # Pin a different pgpushy release in pgpushy.pin, and print the diff to review

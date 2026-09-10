@@ -20,6 +20,19 @@ fail() {
 
 : "${COMMAND:?}" "${GITHUB_OUTPUT:?}" "${RUNNER_TEMP:?}"
 : "${PGPUSHY_ENV:=}" "${CONFIG:=}" "${PLAN_OUT:=}" "${PLAN:=}" "${WORKING_DIRECTORY:=.}"
+: "${PASSWORD_COMMAND:=}" "${PLAN_PASSWORD_COMMAND:=}"
+: "${PASSWORD_FILE:=}" "${PLAN_PASSWORD_FILE:=}"
+
+# A minted password is on disk only long enough for this step to read it into
+# its own environment, and a pgpushy that failed halfway is exactly when a live
+# credential should not be left in the runner's temp directory. The trap is
+# what covers the failures; the ordinary path deletes each file the moment it
+# has been read.
+clean_passwords() {
+    [ -z "$PASSWORD_FILE" ] || rm -f "$PASSWORD_FILE"
+    [ -z "$PLAN_PASSWORD_FILE" ] || rm -f "$PLAN_PASSWORD_FILE"
+}
+trap clean_passwords EXIT
 
 # `setup` installs and stops. It still reports an exit code, so that a
 # workflow reading `exit-code` does not have to care which command ran.
@@ -27,6 +40,27 @@ if [ "$COMMAND" = setup ]; then
     echo "exit-code=0" >>"$GITHUB_OUTPUT"
     exit 0
 fi
+
+# The other half of the mint: mint.sh wrote the password to a file because a
+# composite step cannot export a variable to a sibling step except through
+# GITHUB_ENV, which persists for every later step in the job. Read here, into
+# this step's own environment, so that pgpushy is the only thing that sees it.
+# `$(cat …)` strips trailing newlines and the file has none: mint.sh refuses a
+# password containing one and writes the value with nothing after it.
+read_minted() {
+    local input="$1" var="$2" file="$3"
+
+    [ -f "$file" ] ||
+        fail "'$input' was set but no password reached this step: the minting step did not run, or its file was removed. This is the action's own wiring, not a workflow's input."
+
+    printf -v "$var" '%s' "$(cat "$file")"
+    export "${var?}"
+    rm -f "$file"
+}
+
+[ -z "$PASSWORD_COMMAND" ] || read_minted password-command PGPASSWORD "$PASSWORD_FILE"
+[ -z "$PLAN_PASSWORD_COMMAND" ] ||
+    read_minted plan-password-command PGPUSHY_PLAN_PASSWORD "$PLAN_PASSWORD_FILE"
 
 # Checked in inputs.sh, before anything was downloaded; this is the same
 # check at the point of use.

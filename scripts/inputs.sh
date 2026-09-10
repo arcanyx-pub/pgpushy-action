@@ -27,6 +27,10 @@ forbid() {
 : "${COMMAND:?}" "${VERSION:=}"
 : "${PGPUSHY_ENV:=}" "${CONFIG:=}" "${PLAN_OUT:=}" "${PLAN:=}" "${COMMENT:=}"
 : "${ON_DESTRUCTIVE:=}" "${WORKING_DIRECTORY:=.}"
+: "${PASSWORD_COMMAND:=}" "${PLAN_PASSWORD_COMMAND:=}"
+# Read from the job's environment rather than from an input, the same way
+# mask.sh reads them: they are pgpushy's own interface (spec §10.2, §10.4).
+: "${PGPASSWORD:=}" "${PGPUSHY_PLAN_PASSWORD:=}"
 
 case "$COMMAND" in
     setup | validate | generate-check | plan | apply) ;;
@@ -55,6 +59,28 @@ case "$COMMAND" in
         forbid env "$PGPUSHY_ENV" "the 'plan' and 'apply' commands"
         ;;
 esac
+
+# A password is for connecting, and `setup`, `validate` and `generate-check`
+# connect to nothing. Minting one for them would run a command — and charge an
+# API call, and burn a token's lifetime — for a value nothing would read.
+case "$COMMAND" in
+    plan | apply) ;;
+    *)
+        forbid password-command "$PASSWORD_COMMAND" "the 'plan' and 'apply' commands"
+        forbid plan-password-command "$PLAN_PASSWORD_COMMAND" "the 'plan' and 'apply' commands"
+        ;;
+esac
+
+# One source of truth per password. Both set is not a precedence question worth
+# answering: whichever one this action picked, the workflow's author believes
+# in the other, and a run that connects with a credential nobody chose is worse
+# than a run that stops here.
+if [ -n "$PASSWORD_COMMAND" ] && [ -n "$PGPASSWORD" ]; then
+    fail "'password-command' and PGPASSWORD are both set: the action would have two target passwords and no way to know which one you meant. Keep the input, or keep the environment variable."
+fi
+if [ -n "$PLAN_PASSWORD_COMMAND" ] && [ -n "$PGPUSHY_PLAN_PASSWORD" ]; then
+    fail "'plan-password-command' and PGPUSHY_PLAN_PASSWORD are both set: the action would have two plan-database passwords and no way to know which one you meant. Keep the input, or keep the environment variable."
+fi
 
 [ "$COMMAND" = plan ] || forbid plan-out "$PLAN_OUT" "the 'plan' command"
 [ "$COMMAND" = apply ] || forbid plan "$PLAN" "the 'apply' command"

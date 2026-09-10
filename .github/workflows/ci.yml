@@ -60,8 +60,9 @@ jobs:
   # No database, no pull request, no token, no runner. These are the parts of
   # the action worth running against a table of inputs: the body a hostile
   # branch can reach — a plan echoes the DDL it was given — the escaping that
-  # decides what the log masker actually registers, and the step that decides
-  # whether a run failed. `just lint` runs the same three.
+  # decides what the log masker actually registers, what an arbitrary command's
+  # output is allowed to become, and the step that decides whether a run
+  # failed. `just lint` runs the same four.
   fixtures:
     name: Fixtures
     runs-on: ubuntu-latest
@@ -69,6 +70,7 @@ jobs:
       - uses: actions/checkout@v7
       - run: bash .github/fixtures/comment/check.sh
       - run: bash .github/fixtures/mask/check.sh
+      - run: bash .github/fixtures/mint/check.sh
       - run: bash .github/fixtures/exit/check.sh
 
   # pgpushy.pin is this action's claim about the integrity of the binary it
@@ -280,6 +282,10 @@ jobs:
           [env.other]
           db   = "shop_other"
           user = "postgres"
+
+          [env.minted]
+          db   = "shop"
+          user = "minter"
           TOML
           sed 's/^\[env.ci\]$/[env.ci]\nallow_destructive = true/' \
             "$PROJECT/pgpushy.ci.toml" > "$PROJECT/pgpushy.allow.toml"
@@ -299,10 +305,16 @@ jobs:
       # pgpushy issues no DDL of its own against the target, so a managed
       # schema must already exist (spec §6.1). The list is read out of the
       # example's own configuration rather than written twice.
+      #
+      # `minter` reaches the same database under a password of its own, which
+      # is what makes the minting section below testable: the value the action
+      # mints has to be one this job does not have in its environment anyway.
       - name: Create the target databases and their managed schemas
         run: |
           set -euo pipefail
           read -ra schema_list <<< "$MANAGED_SCHEMAS"
+          psql -h localhost -U postgres -d postgres \
+            -c "CREATE ROLE minter LOGIN SUPERUSER PASSWORD 'minted-ci-password'"
           for db in shop shop_other; do
             psql -h localhost -U postgres -d postgres -c "CREATE DATABASE $db"
             for schema in "${schema_list[@]}"; do
@@ -493,7 +505,195 @@ jobs:
           echo "comments carrying the env=ci marker: $count"
           test "$count" = "1"
 
-      # 5. The wrong target. The artifact was planned against shop; `other`
+      # 5. Minting the target password inside the action.
+      #
+      # A credential a job computes rather than stores — an RDS IAM token, an
+      # OIDC exchange — has never been through a secret store, so nothing masks
+      # it, and this action's mask step runs after the step that would have
+      # minted it. `password-command` mints it here instead, masks it at the
+      # moment it exists, and hands it to pgpushy through the composite's own
+      # step environment.
+      #
+      # A fake minter and a role of its own: what is under test is the action's
+      # plumbing, and the assertions have to be about a value this job does not
+      # already carry in its environment.
+
+      - id: minted-plan
+        uses: ./
+        with:
+          command: plan
+          env: minted
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+          plan-out: ./plan-minted
+          # `aws rds generate-db-auth-token …` in a real workflow. Reading the
+          # environment is part of what is being tested: a minting CLI finds
+          # its own credentials there, so the command has to inherit the job's.
+          password-command: printf '%s\n' "$MINTED_PASSWORD"
+        env:
+          # The job hands every other step a stored password. This is the case
+          # the input exists for, where there is no stored password at all.
+          PGPASSWORD: ""
+          MINTED_PASSWORD: minted-ci-password
+
+      - name: The minted password planned, and reached no other step
+        run: |
+          set -euo pipefail
+          test "${{ steps.minted-plan.outcome }}" = "success"
+          test "${{ steps.minted-plan.outputs.exit-code }}" = "0"
+          test "${{ steps.minted-plan.outputs.destructive }}" = "false"
+          test -f "$PROJECT/plan-minted/summary.json"
+          # The file the minting step wrote is gone: the step that runs pgpushy
+          # reads it into its own environment and deletes it, and the action
+          # deletes it again at the end whatever the outcome was.
+          test ! -e "$RUNNER_TEMP/pgpushy-action-password"
+          # And the value is in no later step's environment. GITHUB_ENV is the
+          # only way a composite step can export one to a sibling, and it
+          # applies to every step after it in the job — including third-party
+          # actions the workflow did not write — which is what the file avoids.
+          test "$(env | grep -c minted-ci-password || true)" = "0"
+
+      # The minting script's own stdout, run directly. A composite step's
+      # output is not readable from the job that called it, so what can be
+      # checked here is that the script the action ran hands the runner the
+      # value this job's minter produces, and says so without printing it.
+      - name: The minted password is registered with the log masker
+        env:
+          INPUT_NAME: password-command
+          VAR_NAME: PGPASSWORD
+          MINT_COMMAND: printf '%s\n' "$MINTED_PASSWORD"
+          MINTED_PASSWORD: minted-ci-password
+          PASSWORD_FILE: ${{ runner.temp }}/pgpushy-action-mask-check
+        run: |
+          set -euo pipefail
+          out=$(./scripts/mint.sh)
+          grep -qF 'pgpushy-action: masked PGPASSWORD' <<< "$out"
+          # Exactly one line carries the value: the ::add-mask:: command, which
+          # is how a value is handed to the runner to redact. The line that
+          # confirms the masking names the variable and never its contents.
+          test "$(grep -cF "$MINTED_PASSWORD" <<< "$out")" = "1"
+          grep -qF "::add-mask::$MINTED_PASSWORD" <<< "$out"
+          test "$(cat "$PASSWORD_FILE")" = "$MINTED_PASSWORD"
+          rm -f "$PASSWORD_FILE"
+
+      - id: minter-fails
+        continue-on-error: true
+        uses: ./
+        with:
+          command: plan
+          env: minted
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+          password-command: printf '%s\n' never-logged-token; exit 9
+        env:
+          PGPASSWORD: ""
+
+      - name: A minter that fails is refused by name, and its output stays out of the log
+        env:
+          INPUT_NAME: password-command
+          VAR_NAME: PGPASSWORD
+          MINT_COMMAND: printf '%s\n' never-logged-token; exit 9
+          PASSWORD_FILE: ${{ runner.temp }}/pgpushy-action-fail-check
+        run: |
+          set -euo pipefail
+          test "${{ steps.minter-fails.outcome }}" = "failure"
+          test ! -e "$RUNNER_TEMP/pgpushy-action-password"
+          # The action's own error goes to the runner log, which a later step
+          # cannot read, so the message is checked by running the script the
+          # action ran with the command it was given.
+          if out=$(./scripts/mint.sh 2>&1); then
+            echo "mint.sh accepted a minter that exited 9: $out" >&2
+            exit 1
+          fi
+          grep -qF "::error::pgpushy-action: 'password-command' exited 9" <<< "$out"
+          if grep -qF never-logged-token <<< "$out"; then
+            echo "mint.sh printed what the failing command wrote to stdout" >&2
+            exit 1
+          fi
+          test ! -e "$PASSWORD_FILE"
+
+      - id: minter-empty
+        continue-on-error: true
+        uses: ./
+        with:
+          command: plan
+          env: minted
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+          password-command: printf '\n'
+        env:
+          PGPASSWORD: ""
+
+      - name: A minter that produces nothing fails rather than connecting with nothing
+        env:
+          INPUT_NAME: password-command
+          VAR_NAME: PGPASSWORD
+          MINT_COMMAND: printf '\n'
+          PASSWORD_FILE: ${{ runner.temp }}/pgpushy-action-empty-check
+        run: |
+          set -euo pipefail
+          test "${{ steps.minter-empty.outcome }}" = "failure"
+          if out=$(./scripts/mint.sh 2>&1); then
+            echo "mint.sh accepted an empty password: $out" >&2
+            exit 1
+          fi
+          grep -qF "::error::pgpushy-action: 'password-command' produced an empty password" <<< "$out"
+          test ! -e "$PASSWORD_FILE"
+
+      # One source of truth per password. This step inherits the job's
+      # PGPASSWORD, so setting the input as well is the misuse.
+      - id: password-command-and-pgpassword
+        continue-on-error: true
+        uses: ./
+        with:
+          command: plan
+          env: ci
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+          password-command: printf '%s\n' minted-ci-password
+
+      - name: A minted password and a stored one together are refused by name
+        env:
+          COMMAND: plan
+          PGPUSHY_ENV: ci
+          PASSWORD_COMMAND: printf '%s\n' minted-ci-password
+        run: |
+          set -euo pipefail
+          test "${{ steps.password-command-and-pgpassword.outcome }}" = "failure"
+          if out=$(./scripts/inputs.sh 2>&1); then
+            echo "inputs.sh accepted a password-command beside PGPASSWORD: $out" >&2
+            exit 1
+          fi
+          grep -qF "::error::pgpushy-action: 'password-command' and PGPASSWORD are both set" <<< "$out"
+
+      # And a password minted for a command that connects to nothing is a call
+      # to a credential API for a value nothing would read.
+      - id: password-command-on-validate
+        continue-on-error: true
+        uses: ./
+        with:
+          command: validate
+          config: pgpushy.ci.toml
+          working-directory: pgpushy-src/example
+          password-command: printf '%s\n' minted-ci-password
+        env:
+          PGPASSWORD: ""
+
+      - name: password-command is refused for a command that connects to nothing
+        env:
+          COMMAND: validate
+          PASSWORD_COMMAND: printf '%s\n' minted-ci-password
+          PGPASSWORD: ""
+        run: |
+          set -euo pipefail
+          test "${{ steps.password-command-on-validate.outcome }}" = "failure"
+          if out=$(./scripts/inputs.sh 2>&1); then
+            echo "inputs.sh accepted a password-command on a validate: $out" >&2
+            exit 1
+          fi
+          grep -qF "::error::pgpushy-action: 'password-command' applies to the 'plan' and 'apply' commands only" <<< "$out"
+
+      # 6. The wrong target. The artifact was planned against shop; `other`
       # reaches a different database on the same cluster, which is the case
       # pgschema's own fingerprint is silent about and the reason the manifest
       # records an identity at all (spec §8.9).
@@ -521,7 +721,7 @@ jobs:
           grep -q "planned against" "$RUNNER_TEMP/pgpushy-apply.log"
           grep -qi "shop_other" "$RUNNER_TEMP/pgpushy-apply.log"
 
-      # 6. Destruction. Deleting teams.sql removes app.teams and
+      # 7. Destruction. Deleting teams.sql removes app.teams and
       # app.employees, which reference each other and nothing else references.
 
       - name: Remove a table from the desired state
@@ -568,7 +768,7 @@ jobs:
           test "${{ steps.destructive-allowed.outputs.destructive }}" = "true"
           test "$(jq -r '.total.destructive' "$PROJECT/plan-allowed/summary.json")" = "2"
 
-      # 7. Routing on a destructive plan instead of stopping on it. The same
+      # 8. Routing on a destructive plan instead of stopping on it. The same
       # tree and the same environment as step 6 — pgpushy still exits 2 and the
       # artifact still lists both drops — with no continue-on-error on the
       # step, which is the point: the outcome has to distinguish this from a

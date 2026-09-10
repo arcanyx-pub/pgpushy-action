@@ -150,6 +150,8 @@ jobs:
 | `working-directory` | no | `.` | Where pgpushy runs. |
 | `plan-out` | `plan` only | | Where the plan artifact is written. Relative to `working-directory`. |
 | `plan` | `apply` only | | A plan artifact to apply exactly. Relative to `working-directory`. |
+| `password-command` | `plan`/`apply` only | | A command whose standard output is the target's password, minted and masked inside the action instead of passed in as `PGPASSWORD`. Refused beside a non-empty `PGPASSWORD`. See [Minted credentials](#minted-credentials). |
+| `plan-password-command` | `plan`/`apply` only | | The same for an external plan database's `PGPUSHY_PLAN_PASSWORD`. Refused beside a non-empty one. |
 | `comment` | `plan` only | `false` | Upsert the plan as a pull-request comment. |
 | `on-destructive` | `plan` only | `fail` | `fail` or `continue`: whether a destructive plan (exit 2) fails the step. Exit 1 fails it either way. |
 | `token` | no | `${{ github.token }}` | Used only to post that comment. |
@@ -275,7 +277,9 @@ log masker for the rest of the job. A value from `secrets.*` is masked already;
 the one this covers is a password **minted during the run** — an OIDC exchange,
 an RDS auth token, anything a step computed rather than stored — which no
 secret store ever saw and therefore no secret store masks. Steps that ran
-before this action are not covered, and a value under eight characters is left
+before this action are not covered — which is what
+[`password-command`](#minted-credentials) is for — and a value under eight
+characters is left
 alone: the runner redacts every occurrence of a masked string anywhere in the
 log, so masking a short one would black out unrelated text.
 
@@ -288,6 +292,64 @@ is not also a word the schema uses. The pull-request comment is the exception,
 and not a reassuring one: it is posted through the API rather than written to
 the log, so it is never scrubbed, and a plan that quotes a masked value quotes
 it in full there.
+
+### Minted credentials
+
+A password that came from `secrets.*` is masked before the job starts. One the
+job **mints** — an RDS IAM auth token, an OIDC exchange — has never been
+through a secret store, so nothing masks it, and a step that minted it in your
+own workflow has already run by the time this action's mask step does.
+`password-command` moves the minting inside the action, so the value is handed
+to the log masker before it exists anywhere else:
+
+```yaml
+- uses: arcanyx-pub/pgpushy-action@v2
+  with:
+    command: apply
+    env: prod
+    plan: ./plan
+    password-command: >-
+      aws rds generate-db-auth-token
+      --hostname db.example.internal --port 5432
+      --username deploy --region eu-west-1
+```
+
+The token is masked at the moment it is minted, and it never reaches
+`GITHUB_ENV` — the action hands it to pgpushy through the step's own
+environment, so no later step in the job, and no third-party action, sees it.
+`plan-password-command` does the same for an external plan database's
+`PGPUSHY_PLAN_PASSWORD`.
+
+The command runs with `bash --noprofile --norc -eo pipefail -c`, in
+`working-directory`, with the job's environment — so the AWS or gcloud CLI
+finds its own credentials. It is **your text at your own trust level**, exactly
+like a `run:` step in the same workflow, which is one more reason never to run
+this action on [`pull_request_target`](#never-use-this-with-pull_request_target).
+
+Standard output is the password with one trailing newline stripped. An empty
+result, a result that still contains a newline, a non-zero exit, and a command
+that has not finished in 60 seconds are each refused by the name of the input —
+never by printing what the command produced, because that is the password.
+Standard error passes through to the log untouched, which is where a minting
+CLI puts the error a human needs. Setting the input beside a non-empty
+`PGPASSWORD` is refused too: one source of truth per password.
+
+If you mint in a step of your own — because you use `command: setup`, or
+because the token is used by more than this action — mask it yourself, first
+thing, and the action's own mask step is not what covers you:
+
+```yaml
+- run: |
+    token=$(aws rds generate-db-auth-token --hostname "$DB_HOST" --port 5432 \
+      --username deploy --region eu-west-1)
+    echo "::add-mask::$token"
+    echo "PGPASSWORD=$token" >> "$GITHUB_ENV"
+```
+
+Escape the value the way the runner un-escapes it before masking — `%` as
+`%25`, then CR as `%0D` and LF as `%0A` — or a token containing one of those
+sequences registers as a different string and goes on appearing in the log in
+full.
 
 ## Never use this with `pull_request_target`
 
@@ -305,6 +367,12 @@ the pull request's head would be worse here than in most actions, because
 Both are read out of the tree, which is what makes them right for a
 same-repository branch and wrong for an untrusted one. Use `pull_request`. The
 action refuses to comment on any other event for the same reason.
+
+`password-command` is a third argv the action executes, and it is safe for the
+opposite reason: it comes from the workflow file rather than from the tree, so
+a fork's head cannot change it. That holds only as long as the command is
+literal text — a `${{ github.event.* }}` interpolated into it is pull-request
+data in a shell command, which is the injection this warning is about.
 
 ## The destructive gate
 
