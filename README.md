@@ -279,9 +279,9 @@ an RDS auth token, anything a step computed rather than stored — which no
 secret store ever saw and therefore no secret store masks. Steps that ran
 before this action are not covered — which is what
 [`password-command`](#minted-credentials) is for — and a value under eight
-characters is left
-alone: the runner redacts every occurrence of a masked string anywhere in the
-log, so masking a short one would black out unrelated text.
+characters is left alone: the runner redacts every occurrence of a masked
+string anywhere in the log, so masking a short one would black out unrelated
+text.
 
 That last part is inherent, not a threshold. A password that happens to equal
 an identifier — an environment name, a schema, a table — blacks out that word
@@ -316,9 +316,17 @@ to the log masker before it exists anywhere else:
 
 The token is masked at the moment it is minted, and it never reaches
 `GITHUB_ENV` — the action hands it to pgpushy through the step's own
-environment, so no later step in the job, and no third-party action, sees it.
+environment, so no step after the action sees it, third-party actions included.
 `plan-password-command` does the same for an external plan database's
 `PGPUSHY_PLAN_PASSWORD`.
+
+Between the two steps the value is a `0600` file in `RUNNER_TEMP`, deleted by
+the step that reads it and again at the end of the action whatever the outcome.
+A **cancelled** job is the gap: the runner may kill the job before that last
+step runs, and on a hosted runner the whole machine goes with it. On a
+self-hosted runner `RUNNER_TEMP` outlives the job unless the runner is
+configured to clean it, which is that runner's business rather than this
+action's.
 
 The command runs with `bash --noprofile --norc -eo pipefail -c`, in
 `working-directory`, with the job's environment — so the AWS or gcloud CLI
@@ -326,13 +334,26 @@ finds its own credentials. It is **your text at your own trust level**, exactly
 like a `run:` step in the same workflow, which is one more reason never to run
 this action on [`pull_request_target`](#never-use-this-with-pull_request_target).
 
-Standard output is the password with one trailing newline stripped. An empty
-result, a result that still contains a newline, a non-zero exit, and a command
-that has not finished in 60 seconds are each refused by the name of the input —
-never by printing what the command produced, because that is the password.
+Standard output is the password with one trailing newline stripped. Each of
+these is refused by the name of the input — never by printing what the command
+produced, because that is the password:
+
+- an empty result, or one that is nothing but whitespace;
+- a result shorter than eight characters, which no credential API mints and
+  which the log masker will not register: a short result is an error string or
+  a truncated read, not a password;
+- a result still carrying a newline or a carriage return, the second of which
+  is what a CRLF minter leaves behind — refused rather than trimmed, because
+  connecting with something the command did not print is a worse answer;
+- a non-zero exit, and a command unfinished after 60 seconds.
+
 Standard error passes through to the log untouched, which is where a minting
-CLI puts the error a human needs. Setting the input beside a non-empty
-`PGPASSWORD` is refused too: one source of truth per password.
+CLI puts the error a human needs. It is **not masked** — at that moment nothing
+is masked yet — so never give the minter a debug or verbose flag: a CLI that
+echoes the credential it just minted puts it in the log in full, permanently.
+
+Setting the input beside a non-empty `PGPASSWORD` is refused too: one source of
+truth per password.
 
 If you mint in a step of your own — because you use `command: setup`, or
 because the token is used by more than this action — mask it yourself, first
@@ -342,14 +363,22 @@ thing, and the action's own mask step is not what covers you:
 - run: |
     token=$(aws rds generate-db-auth-token --hostname "$DB_HOST" --port 5432 \
       --username deploy --region eu-west-1)
-    echo "::add-mask::$token"
-    echo "PGPASSWORD=$token" >> "$GITHUB_ENV"
+    # The runner un-escapes the data before the masker sees it, so a token
+    # containing % or a line break registers as a different string unless it
+    # was escaped here. Percent first, or the escapes below get escaped too.
+    t=${token//%/%25}; t=${t//$'\r'/%0D}; t=${t//$'\n'/%0A}
+    echo "::add-mask::$t"
+    # The heredoc form, because a `NAME=value` line cannot carry a value with a
+    # newline in it — and because a value ending in one would otherwise let the
+    # rest of the file be read as more assignments.
+    { echo "PGPASSWORD<<PGPUSHY_EOF"; echo "$token"; echo "PGPUSHY_EOF"; } >> "$GITHUB_ENV"
 ```
 
-Escape the value the way the runner un-escapes it before masking — `%` as
-`%25`, then CR as `%0D` and LF as `%0A` — or a token containing one of those
-sequences registers as a different string and goes on appearing in the log in
-full.
+The escaping is the whole of it: a token containing `%25`, `%0A` or `%0D`
+registers as a different string, and the step reports the value masked while
+the log goes on showing it. Note also what this recipe cannot buy back — the
+value is in `GITHUB_ENV` now, so every later step in the job has it, which is
+the difference `password-command` makes.
 
 ## Never use this with `pull_request_target`
 

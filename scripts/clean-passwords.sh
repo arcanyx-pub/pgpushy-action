@@ -14,5 +14,7 @@ set -euo pipefail
 
 : "${PASSWORD_FILE:=}" "${PLAN_PASSWORD_FILE:=}"
 
-[ -z "$PASSWORD_FILE" ] || rm -f "$PASSWORD_FILE"
-[ -z "$PLAN_PASSWORD_FILE" ] || rm -f "$PLAN_PASSWORD_FILE"
+# The glob is mint.sh's scratch file, which holds the minting command's raw
+# output: mint.sh removes its own, but a step killed outright never runs a trap.
+[ -z "$PASSWORD_FILE" ] || rm -f "$PASSWORD_FILE" "$PASSWORD_FILE".*
+[ -z "$PLAN_PASSWORD_FILE" ] || rm -f "$PLAN_PASSWORD_FILE" "$PLAN_PASSWORD_FILE".*

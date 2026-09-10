@@ -17,9 +17,25 @@
 # no more. It is not a place to put anything that came out of a pull request;
 # see "Never use this with pull_request_target" in the README.
 #
+# What this script cannot cover is the command printing the password itself:
+# standard error goes to the log unmasked, because at that moment nothing is
+# masked yet. A minter run with a debug or verbose flag can therefore put the
+# credential in the log in full, permanently.
+#
 # One password per invocation: the action calls this once for the target and
 # once for an external plan database (spec §10.4), which are two commands
 # minting two credentials for two servers.
+
+# Before anything expands a value. An earlier step, or any earlier action, can
+# put SHELLOPTS=xtrace into the job's environment through GITHUB_ENV, and a
+# bash that starts with tracing on traces every expansion to standard error —
+# which is the log, at a point where nothing is masked yet. SHELLOPTS is
+# readonly and cannot be unset, but it is also dynamic and exported: `set +x`
+# takes xtrace out of it, and out of the copy the minting command inherits
+# (verified). BASH_XTRACEFD is the other half of the same switch, choosing
+# where a trace is written.
+set +x
+unset BASH_XTRACEFD 2>/dev/null || true
 
 set -euo pipefail
 
@@ -46,7 +62,8 @@ fail() {
 : "${PGPUSHY_ACTION_MINT_TIMEOUT:=60}"
 
 # Everything this script creates holds a password: 0600 from the moment it
-# exists, rather than created and then chmod-ed.
+# exists, rather than created and then chmod-ed. The minting command inherits
+# it, so a CLI that caches a token beside its config writes that 0600 too.
 umask 077
 
 cd "$WORKING_DIRECTORY" ||
@@ -54,8 +71,10 @@ cd "$WORKING_DIRECTORY" ||
 
 # A file left behind by an earlier run of the action in this job must never be
 # read as this run's password. Removed before the command runs, so there is no
-# window where a stale value would satisfy the step that reads it.
-rm -f "$PASSWORD_FILE"
+# window where a stale value would satisfy the step that reads it. The glob
+# takes the scratch file below with it, including one left by a previous run
+# that was killed before its own trap could fire.
+rm -f "$PASSWORD_FILE" "$PASSWORD_FILE".*
 
 raw=$(mktemp "$PASSWORD_FILE.XXXXXX")
 expired="$raw.expired"
@@ -89,8 +108,20 @@ timed_out=no
 if [ -n "$timeout_bin" ]; then
     "$timeout_bin" --kill-after=5 "$PGPUSHY_ACTION_MINT_TIMEOUT" \
         bash --noprofile --norc -eo pipefail -c "$MINT_COMMAND" >"$raw" || status=$?
-    [ "$status" != 124 ] || timed_out=yes
+    # 124 is the deadline; 137 is the command being killed five seconds later
+    # because it ignored the first signal. A command that chose to exit 124 or
+    # 137 by itself is reported as a timeout, which is the price of reading a
+    # status rather than a marker — and either way the mint did not produce a
+    # password.
+    case "$status" in
+        124 | 137) timed_out=yes ;;
+    esac
 else
+    # Job control, so the command runs in a process group of its own and a
+    # signal to that group reaches whatever it started. Without it a minter
+    # that backgrounds something outlives its own timeout, which is what GNU
+    # timeout does for us above.
+    set -m
     bash --noprofile --norc -eo pipefail -c "$MINT_COMMAND" >"$raw" &
     minter=$!
     # The marker file, and not the exit status, is what says the deadline was
@@ -100,14 +131,20 @@ else
     (
         sleep "$PGPUSHY_ACTION_MINT_TIMEOUT"
         : >"$expired"
-        kill -TERM "$minter" 2>/dev/null
+        kill -TERM -"$minter" 2>/dev/null || kill -TERM "$minter" 2>/dev/null
         sleep 5
-        kill -KILL "$minter" 2>/dev/null
+        kill -KILL -"$minter" 2>/dev/null || kill -KILL "$minter" 2>/dev/null
     ) &
     watchdog=$!
-    wait "$minter" || status=$?
-    kill -TERM "$watchdog" 2>/dev/null || true
-    wait "$watchdog" 2>/dev/null || true
+    set +m
+    # The redirection is the shell's own "Killed" job notification, which says
+    # nothing a human needs and nothing the command printed. The minting
+    # command's stderr was connected when it was forked and is untouched by it.
+    { wait "$minter" || status=$?; } 2>/dev/null
+    # The group again, so the watchdog's sleep goes with it rather than being
+    # orphaned for the rest of the timeout.
+    kill -TERM -"$watchdog" 2>/dev/null || kill -TERM "$watchdog" 2>/dev/null || true
+    { wait "$watchdog" || true; } 2>/dev/null
     [ ! -e "$expired" ] || timed_out=yes
 fi
 
@@ -119,6 +156,13 @@ if [ "$status" != 0 ]; then
     # and must not be: on a command that failed *after* printing, stdout is
     # still the password.
     fail "'$INPUT_NAME' exited $status. Its own error output is above; what it wrote to standard output is not shown, because that is where the password would be."
+fi
+
+# Bash drops a NUL from a command substitution and carries on, so reading the
+# output below would silently produce a *different* password than the command
+# printed. Refused instead: this script never guesses at what was meant.
+if [ "$(wc -c <"$raw")" -ne "$(tr -d '\0' <"$raw" | wc -c)" ]; then
+    fail "'$INPUT_NAME' produced output containing a NUL byte, which is not a password this action will guess at. The value is not shown."
 fi
 
 # Command substitution strips *every* trailing newline, and the contract is to
@@ -133,13 +177,42 @@ value=$(
 value=${value%x}
 value=${value%$'\n'}
 
-[ -n "$value" ] ||
-    fail "'$INPUT_NAME' produced an empty password. A command that prints nothing has not failed loudly enough to be a mint: check its own error output above."
+# Whitespace inside the value is kept, including at the ends: the runner
+# registers the data of an `::add-mask::` command as it arrives, without
+# trimming it (actions/runner, AddMaskCommandExtension.ProcessCommand in
+# src/Runner.Worker/ActionCommandManager.cs, which passes command.Data to
+# SecretMasker.AddValue unchanged), so what gets masked is what pgpushy will
+# use. A value that is *nothing but* whitespace is the exception the same
+# method makes — IsNullOrWhiteSpace, warn, register nothing — and is refused
+# here with the empty case, because it would go into the log unmasked.
+if [ -z "${value//[[:space:]]/}" ]; then
+    fail "'$INPUT_NAME' produced an empty password (or nothing but whitespace, which the runner declines to mask at all). A command that prints nothing has not failed loudly enough to be a mint: check its own error output above."
+fi
+
+line_break=""
 case "$value" in
-    *$'\n'*)
-        fail "'$INPUT_NAME' produced a password containing a newline. pgpushy reads $VAR_NAME from the environment, which a multi-line value does not survive cleanly, so it is refused rather than truncated. The value is not shown."
-        ;;
+    *$'\r'*) line_break="a carriage return" ;;
+    *$'\n'*) line_break="a newline" ;;
 esac
+if [ -n "$line_break" ]; then
+    # The carriage return is the one a CRLF minter leaves behind once the
+    # trailing newline is stripped. Refused rather than trimmed, for the same
+    # reason as the second newline: pgpushy reads this variable from the
+    # environment, where a stray control character is part of the password, and
+    # quietly repairing one would mean connecting with something the command
+    # did not print.
+    fail "'$INPUT_NAME' produced a password containing $line_break. pgpushy reads $VAR_NAME from the environment, which such a value does not survive cleanly, so it is refused rather than trimmed. The value is not shown."
+fi
+
+# The masker's floor, applied here as a refusal rather than as a warning. For a
+# password that was already in the job's environment, not masking a short value
+# is the lesser harm — see mask-lib.sh. For a minted one it is a symptom: no
+# credential API returns eight characters, so a short result is an error string
+# or a truncated read, and connecting with it would fail anyway, in the log,
+# unmasked.
+if [ "${#value}" -lt "$MIN_LENGTH" ]; then
+    fail "'$INPUT_NAME' produced a password shorter than $MIN_LENGTH characters, which no credential API mints and which the runner's log masker will not register. Treat it as a failed mint: check the command's own error output above. The value is not shown."
+fi
 
 # Before the value is anywhere but this process: from here on it is on disk,
 # and the next thing that reads it is a step that logs.
@@ -147,7 +220,7 @@ mask "$VAR_NAME" "$value"
 
 # A composite action's step cannot export an environment variable to a sibling
 # step except through GITHUB_ENV, and GITHUB_ENV is exactly the persistence
-# this input exists to avoid: it applies to every later step in the job,
+# this input exists to avoid: it applies to every step after the action,
 # including third-party actions the workflow did not write. So the value goes
 # to a file only this run's user can read, the step that runs pgpushy reads it
 # into its own environment and deletes it, and the action deletes it again at

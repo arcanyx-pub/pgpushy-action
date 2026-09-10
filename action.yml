@@ -113,13 +113,21 @@ inputs:
       same as a `run:` step, which is another reason never to run this action
       on `pull_request_target`.
 
-      Standard output is the password with one trailing newline stripped; an
-      empty result, a result still containing a newline, a non-zero exit and a
-      command that has not finished in 60 seconds are each refused by name,
-      without the value. Standard error passes through to the log untouched,
-      which is where a minting CLI's own errors are.
+      Standard output is the password with one trailing newline stripped. A
+      result that is empty, shorter than eight characters, or still carrying a
+      newline or a carriage return, a non-zero exit, and a command unfinished
+      after 60 seconds are each refused by name, without the value.
 
-      Refused together with a non-empty `PGPASSWORD`: one source of truth.
+      Standard error passes through to the log untouched, which is where a
+      minting CLI's own errors are — and it is *not* masked, because at that
+      moment nothing is masked yet. Never give the minter a debug or verbose
+      flag: a CLI that echoes the credential it just minted puts it in the log
+      in full, permanently.
+
+      Refused together with a non-empty `PGPASSWORD`: one source of truth. And
+      refused for `setup`, `validate` and `generate-check`, which connect to
+      nothing — on `setup` the only way to hand the value onward would be
+      `GITHUB_ENV`, which is the thing this input exists to avoid.
     required: false
   plan-password-command:
     description: |
@@ -189,21 +197,30 @@ runs:
     # PGPUSHY_PLAN_PASSWORD are read from the job's environment, not from an
     # input, and a password the job minted in a step of its own has never been
     # through a secret store that could mask it. This step covers what the job
-    # arrives with; a password `password-command` mints is masked by the step
-    # below, at the moment it comes into existence.
+    # arrives with; a password `password-command` mints is masked by the mint
+    # step below, at the moment it comes into existence.
     - name: Mask the passwords
       shell: bash
       run: '"$GITHUB_ACTION_PATH/scripts/mask.sh"'
 
-    # Minted before the binary is fetched, so a command that cannot produce a
-    # credential fails the step in seconds rather than after a download. The
-    # value is masked inside the script, at the moment it comes into existence,
-    # and reaches the run step through a 0600 file in the runner's temp
-    # directory: a composite step has no way to hand a sibling step an
-    # environment variable except GITHUB_ENV, and GITHUB_ENV would carry the
-    # password to every later step in the job, which is the thing this input
-    # exists to avoid. Each file is deleted by the step that reads it, and
-    # again by the last step here whatever the outcome.
+    # The version and the hash both come from pgpushy.pin, so this step needs
+    # no input: what it installs is a property of the action's own ref.
+    - name: Install pgpushy
+      id: install
+      shell: bash
+      run: '"$GITHUB_ACTION_PATH/scripts/install.sh"'
+
+    # After the download, and immediately before the step that uses it: a
+    # minted credential is short-lived — an RDS auth token lasts fifteen
+    # minutes — and neither that lifetime nor the window in which the value
+    # sits on disk should be spent fetching a binary. The value is masked
+    # inside the script, at the moment it comes into existence, and reaches the
+    # run step through a 0600 file in the runner's temp directory: a composite
+    # step has no way to hand a sibling step an environment variable except
+    # GITHUB_ENV, and GITHUB_ENV would carry the password to every step after
+    # this action, which is the thing this input exists to avoid. Each file is
+    # deleted by the step that reads it, and again by the last step here
+    # whatever the outcome.
     - name: Mint the target password
       if: inputs.password-command != ''
       shell: bash
@@ -225,13 +242,6 @@ runs:
         MINT_COMMAND: ${{ inputs.plan-password-command }}
         PASSWORD_FILE: ${{ runner.temp }}/pgpushy-action-plan-password
         WORKING_DIRECTORY: ${{ inputs.working-directory }}
-
-    # The version and the hash both come from pgpushy.pin, so this step needs
-    # no input: what it installs is a property of the action's own ref.
-    - name: Install pgpushy
-      id: install
-      shell: bash
-      run: '"$GITHUB_ACTION_PATH/scripts/install.sh"'
 
     # Fails only on the action's own errors, never on pgpushy's exit code.
     # That code is the contract (spec §9.1) and has to reach the caller as an

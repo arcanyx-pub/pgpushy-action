@@ -14,7 +14,9 @@
 # blacks out unrelated text — a password of `pw` turns every "pw" in a plan
 # into `***` — and a reviewer reading a redacted plan is worse off than one
 # reading an unmasked short password that should not have been a password.
-readonly MIN_LENGTH=8
+# Guarded, because a script that sources this file twice would otherwise fail
+# on the second assignment to a readonly name.
+[ -n "${MIN_LENGTH:-}" ] || readonly MIN_LENGTH=8
 
 mask() {
     local name="$1" value="$2" escaped

@@ -11,6 +11,15 @@
 # that then exits non-zero are not something to bet a destructive-change gate
 # on.
 
+# Before anything expands a value. This step reads a minted password into its
+# own environment, and a job that put SHELLOPTS=xtrace into the environment
+# through GITHUB_ENV would have bash trace that expansion to the log. SHELLOPTS
+# is readonly and cannot be unset, but it is dynamic and exported, so `set +x`
+# takes xtrace out of it and out of what pgpushy inherits; BASH_XTRACEFD is the
+# same switch's other half.
+set +x
+unset BASH_XTRACEFD 2>/dev/null || true
+
 set -euo pipefail
 
 fail() {
@@ -28,9 +37,11 @@ fail() {
 # credential should not be left in the runner's temp directory. The trap is
 # what covers the failures; the ordinary path deletes each file the moment it
 # has been read.
+# The glob takes mint.sh's scratch file with it: that file holds the command's
+# raw output, and a mint.sh killed outright never ran its own trap.
 clean_passwords() {
-    [ -z "$PASSWORD_FILE" ] || rm -f "$PASSWORD_FILE"
-    [ -z "$PLAN_PASSWORD_FILE" ] || rm -f "$PLAN_PASSWORD_FILE"
+    [ -z "$PASSWORD_FILE" ] || rm -f "$PASSWORD_FILE" "$PASSWORD_FILE".*
+    [ -z "$PLAN_PASSWORD_FILE" ] || rm -f "$PLAN_PASSWORD_FILE" "$PLAN_PASSWORD_FILE".*
 }
 trap clean_passwords EXIT
 
